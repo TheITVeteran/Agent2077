@@ -43,12 +43,16 @@ Agent2077 is a self-hosted AI agent workspace for running local and OpenAI-compa
 Agent2077 can start without Docker, but code execution and app deployment are disabled until Docker is available.
 
 ## Quick start
+Agent2077 is meant to be run on its own linux machine and server on the local network.
 
 ```bash
 git clone https://github.com/JustLateNightAI/Agent2077.git agent2077
 cd agent2077
 npm install
-npm run dev
+npx tsx script/build.ts
+NODE_ENV=production node dist/index.cjs
+
+add the "--listen flag" to have it start serving on the local network.
 ```
 
 Open:
