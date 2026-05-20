@@ -62,7 +62,7 @@ npm install
 npx tsx script/build.ts
 NODE_ENV=production node dist/index.cjs
 
-add the "--listen flag" to have it start serving on the local network.
+add the "--listen flag" to have it start serving on the local network. (When serving on the local network it is your job to make sure it is safe and secure, I do not recomend doing this on public wifi, only on your own private wifi or lan.)
 ```
 
 Open:
