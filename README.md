@@ -2,10 +2,20 @@
 
 Agent2077 is a self-hosted AI agent workspace for running local and OpenAI-compatible models with real tools. It gives you a browser UI where an agent can chat, inspect projects, write code, run commands, remember context, use skills, and deploy Docker-backed apps from one local machine.
 
+You are fully responible for anything that happens by you installing and using this tool.
+
+If this agent is useful to you, feel free to help support its further development :D
+https://ko-fi.com/latenightai
+(current costs spent on development: $1,083.46)
+
+My random neglected Discord: https://discord.gg/3yTAQ4xEAr
+Maybe I'll answer your questions, maybe I wont, depends on my coffee supply.
+
 ![Agent2077 chat home](docs/screenshots/chat-home.png)
 
 ## Highlights
 
+- **Linus only but accessable from windows and Mac**: Agent2077 only runs on linux, but since it local hosts a webui you can use it from a windows or mac PC.
 - **Local-first agent loop**: run against LM Studio, OpenRouter, or any generic OpenAI-compatible `/v1/chat/completions` endpoint.
 - **Smart tool selection**: sends only the tools relevant to the current task instead of dumping every tool schema into every request.
 - **Tool discovery on demand**: `tool_list` and `tool_search` let the agent browse the full tool catalogue without bloating the system prompt.
@@ -59,6 +69,8 @@ Open:
 
 ```text
 http://localhost:5000
+it when serving on the local network it should host to agent2077.local
+(deviceIP:5000)
 ```
 
 Default login:
@@ -73,11 +85,12 @@ Change the default password in **Settings → Security** before exposing the app
 ## Production build
 
 ```bash
-npm run build
-npm start
+NODE_ENV=production node dist/index.cjs
+
 ```
 
 By default the server binds to localhost. Enable LAN serving from **Settings → Network** if you want access from other machines on your network.
+Or launch Agent2077 from the terminal with the --listen flag: NODE_ENV=production node dist/index.cjs --listen
 
 ## Configure a model endpoint
 
