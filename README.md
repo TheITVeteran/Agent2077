@@ -176,7 +176,7 @@ Agent2077 can execute commands, edit files, connect to model endpoints, and depl
 
 ## Status
 
-Agent2077 is under active development. Expect fast iteration around local-model reliability, tool routing, project workflows, and app deployment.
+Agent2077 is under active development by LateNightAI. Expect inconstant Development and sporadic fixes and feature additions. If there's something you really want added to Agent2077 then either wait for me to add it or do it yourself using the Self Dev mode.
 
 ## License
 
