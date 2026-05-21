@@ -2263,9 +2263,16 @@ export default function SettingsPage() {
             </div>
             <Switch
               checked={selfDevEnabled}
-              onCheckedChange={(v) => {
+              onCheckedChange={async (v) => {
                 setSelfDevEnabled(v);
-                saveSettings({ "selfDevEnabled": String(v) });
+                try {
+                  await apiRequest("POST", "/api/settings/self-dev-enabled", { enabled: v });
+                  queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
+                  toast({ title: "Settings saved" });
+                } catch {
+                  setSelfDevEnabled(!v);
+                  toast({ title: "Failed to save Self-Development toggle", variant: "destructive" });
+                }
               }}
               data-testid="switch-self-dev"
             />

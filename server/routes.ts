@@ -1143,6 +1143,18 @@ export function registerRoutes(server: http.Server, app: Express) {
     res.json(settingsStore.getAll());
   });
 
+  // Dedicated endpoint for the Self-Development toggle. Separate from the
+  // general PATCH so that selfDevEnabled cannot be flipped from inside an
+  // agent tool call (see SETTINGS_UI_ONLY_KEYS above).
+  app.post("/api/settings/self-dev-enabled", (req, res) => {
+    const { enabled } = req.body ?? {};
+    if (typeof enabled !== "boolean") {
+      return res.status(400).json({ error: "enabled must be a boolean" });
+    }
+    settingsStore.set("selfDevEnabled", String(enabled));
+    res.json({ selfDevEnabled: String(enabled) });
+  });
+
   // ── OpenRouter balance ──────────────────────────────────────────
   app.get("/api/endpoints/:id/openrouter-balance", async (req, res) => {
     const endpoint = endpointStore.getById(parseInt(req.params.id));
