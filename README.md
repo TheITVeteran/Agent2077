@@ -2,10 +2,20 @@
 
 Agent2077 is a self-hosted AI agent workspace for running local and OpenAI-compatible models with real tools. It gives you a browser UI where an agent can chat, inspect projects, write code, run commands, remember context, use skills, and deploy Docker-backed apps from one local machine.
 
+You are fully responible for anything that happens by you installing and using this tool.
+
+If this agent is useful to you, feel free to help support its further development :D
+https://ko-fi.com/latenightai
+(current costs spent on development: $1,083.46 USD)
+
+My random neglected Discord: https://discord.gg/3yTAQ4xEAr
+Maybe I'll answer your questions, maybe I wont, depends on my coffee supply.
+
 ![Agent2077 chat home](docs/screenshots/chat-home.png)
 
 ## Highlights
 
+- **Linus only but accessable from windows and Mac**: Agent2077 only runs on linux, but since it local hosts a webui you can use it from a windows or mac PC.
 - **Local-first agent loop**: run against LM Studio, OpenRouter, or any generic OpenAI-compatible `/v1/chat/completions` endpoint.
 - **Smart tool selection**: sends only the tools relevant to the current task instead of dumping every tool schema into every request.
 - **Tool discovery on demand**: `tool_list` and `tool_search` let the agent browse the full tool catalogue without bloating the system prompt.
@@ -43,18 +53,24 @@ Agent2077 is a self-hosted AI agent workspace for running local and OpenAI-compa
 Agent2077 can start without Docker, but code execution and app deployment are disabled until Docker is available.
 
 ## Quick start
+Agent2077 is meant to be run on its own linux machine and server on the local network.
 
 ```bash
 git clone https://github.com/JustLateNightAI/Agent2077.git agent2077
 cd agent2077
 npm install
-npm run dev
+npx tsx script/build.ts
+NODE_ENV=production node dist/index.cjs
+
+add the "--listen flag" to have it start serving on the local network. (When serving on the local network it is your job to make sure it is safe and secure, I do not recomend doing this on public wifi, only on your own private wifi or lan.)
 ```
 
 Open:
 
 ```text
 http://localhost:5000
+it when serving on the local network it should host to agent2077.local
+(deviceIP:5000)
 ```
 
 Default login:
@@ -69,11 +85,12 @@ Change the default password in **Settings → Security** before exposing the app
 ## Production build
 
 ```bash
-npm run build
-npm start
+NODE_ENV=production node dist/index.cjs
+
 ```
 
 By default the server binds to localhost. Enable LAN serving from **Settings → Network** if you want access from other machines on your network.
+Or launch Agent2077 from the terminal with the --listen flag: NODE_ENV=production node dist/index.cjs --listen
 
 ## Configure a model endpoint
 
@@ -159,10 +176,17 @@ Agent2077 can execute commands, edit files, connect to model endpoints, and depl
 
 ## Status
 
-Agent2077 is under active development. Expect fast iteration around local-model reliability, tool routing, project workflows, and app deployment.
+Agent2077 is under active development by LateNightAI. Expect inconstant Development and sporadic fixes and feature additions. If there's something you really want added to Agent2077 then either wait for me to add it or do it yourself using the Self Dev mode.
+
+## Useful info rambling from me the Dev :D
+
+I built agent2077 to be modular and useful for coding and making things. I was also making some stuff for it to be useful in chatting and image gen/editing via comfyui but ended up spending most of my time working on the self dev and workspace, and app store. I mostly developed around using LM Studio for local models. If you enable more than one model in the model selector for lm studio, in theory it should load and unload models according to when tasks tags you assign to the models. IE, you turn on Qwen3.6 27B and give it the coding tag, and you turn on gemma4 31B and give it the research tag. It should then load the gemma model to do research, then when given a coding task, unload the gemma model to free the vram, and load the qwen3.6 37B model to do coding. 
+For the app store its mostly meant for webapps, and will require docker to be setup. but the basics of it is, in the normal chat you ask it to build you an app and add it to the app store. IE, "build me a flappy birds game and add it to the app store" then (if the model your using is good enough) it will code up a flappy birds like game and add it to the app store where you can launch it and play it. 
+Hopefully soon if I'm motivated enough I'll make an indepth video on how to setup and use Agent2077 and throw it up and YouTube and I'll link it here if/when I do.
+
 
 ## License
 
 Agent2077 is licensed under the GNU Affero General Public License v3.0. See [LICENSE](LICENSE) for details.
 
-For commercial licensing inquiries, contact greencreeperfilms@gmail.com.
+For commercial licensing inquiries, contact JustLateNightAI@gmail.com.
