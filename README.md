@@ -56,11 +56,8 @@ Agent2077 can start without Docker, but code execution and app deployment are di
 Agent2077 is meant to be run on its own linux machine and server on the local network.
 
 ```bash
-git clone https://github.com/JustLateNightAI/Agent2077.git agent2077
-cd agent2077
-npm install
-npx tsx script/build.ts
-NODE_ENV=production node dist/index.cjs
+in the main folder where the install.sh is, open a terminal and run ./install.sh
+If you have already installed Agent2077 you can launch it by opening the terminal and running ./start.sh
 
 add the "--listen flag" to have it start serving on the local network. (When serving on the local network it is your job to make sure it is safe and secure, I do not recomend doing this on public wifi, only on your own private wifi or lan.)
 ```
@@ -84,10 +81,6 @@ Change the default password in **Settings → Security** before exposing the app
 
 ## Production build
 
-```bash
-NODE_ENV=production node dist/index.cjs
-
-```
 
 By default the server binds to localhost. Enable LAN serving from **Settings → Network** if you want access from other machines on your network.
 Or launch Agent2077 from the terminal with the --listen flag: NODE_ENV=production node dist/index.cjs --listen
