@@ -82,7 +82,7 @@ Change the default password in **Settings → Security** before exposing the app
 
 
 By default the server binds to localhost. Enable LAN serving from **Settings → Network** if you want access from other machines on your network.
-Or launch Agent2077 from the terminal with the --listen flag: NODE_ENV=production node dist/index.cjs --listen
+
 
 ## Configure a model endpoint
 
