@@ -15,7 +15,7 @@ Maybe I'll answer your questions, maybe I wont, depends on my coffee supply.
 
 ## Highlights
 
-- **Linus only but accessable from windows and Mac**: Agent2077 only runs on linux, but since it local hosts a webui you can use it from a windows or mac PC.
+- **Linux only but accessable from windows and Mac**: Agent2077 only runs on linux, but since it local hosts a webui you can use it from a windows or mac PC.
 - **Local-first agent loop**: run against LM Studio, OpenRouter, or any generic OpenAI-compatible `/v1/chat/completions` endpoint.
 - **Smart tool selection**: sends only the tools relevant to the current task instead of dumping every tool schema into every request.
 - **Tool discovery on demand**: `tool_list` and `tool_search` let the agent browse the full tool catalogue without bloating the system prompt.
