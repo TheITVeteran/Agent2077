@@ -357,7 +357,7 @@ Things that exist and work:
 - LAN serving via mDNS
 
 Things that may come eventually:
-- ComfyUI image generation integration
+- Better ComfyUI image generation and editing
 - In-depth setup video on YouTube
 - More app types in the App Store
 
