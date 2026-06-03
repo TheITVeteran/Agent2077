@@ -13,6 +13,8 @@
  * Routes:
  *   respond         — pure chat / question / acknowledgement. No tools needed.
  *   tool_discovery  — "what tools do you have?", "list your tools", etc.
+ *   deep_research   — deliberate multi-source research (forced by the Deep
+ *                     Research toggle; never inferred from text alone).
  *   research        — find/look up information (web or local knowledge)
  *   web             — explicit URL fetching or web browsing
  *   code_read       — inspect/understand existing code without changes
@@ -30,6 +32,7 @@ import type { TaskType } from "../../shared/schema.js";
 export type Route =
   | "respond"
   | "tool_discovery"
+  | "deep_research"
   | "research"
   | "web"
   | "code_read"
@@ -128,6 +131,7 @@ const PROJECT_CONTEXT_RX = /PROJECT CONTEXT/;
 const ROUTE_PREFERRED_CATEGORIES: Record<Route, string[]> = {
   respond:        [],
   tool_discovery: ["system"],
+  deep_research:  ["search", "file"],
   research:       ["search"],
   web:            ["search"],
   code_read:      ["file", "code"],
@@ -141,6 +145,7 @@ const ROUTE_PREFERRED_CATEGORIES: Record<Route, string[]> = {
 const ROUTE_FORCE_INCLUDE: Record<Route, string[]> = {
   respond:        [],
   tool_discovery: ["tool_list", "tool_search"],
+  deep_research:  ["web_search", "fetch_url", "browse_url", "browse_search", "browse_extract"],
   research:       [],
   web:            ["fetch_url"],
   code_read:      [],
@@ -156,8 +161,22 @@ const ROUTE_FORCE_INCLUDE: Record<Route, string[]> = {
  */
 export function routeRequest(
   message: string | undefined,
-  ctx?: { customPrompt?: string; taskType?: TaskType; hasPlan?: boolean }
+  ctx?: { customPrompt?: string; taskType?: TaskType; hasPlan?: boolean; deepResearch?: boolean }
 ): RouteDecision {
+  // ── Deep Research toggle is a hard override ───────────────────────────
+  // The user explicitly asked for deliberate research via the chat-box
+  // toggle. This is never inferred from text — it comes only from the flag —
+  // so it short-circuits all regex scoring and forces the deep_research route.
+  if (ctx?.deepResearch) {
+    return {
+      route: "deep_research",
+      confidence: 1,
+      reasons: ["deep research toggle ON"],
+      preferCategories: ROUTE_PREFERRED_CATEGORIES.deep_research,
+      forceInclude: ROUTE_FORCE_INCLUDE.deep_research,
+    };
+  }
+
   const msg = (message || "").trim();
   if (!msg) {
     return {
@@ -199,7 +218,7 @@ export function routeRequest(
   let best: Route = "unknown";
   let bestScore = 0;
   const PRIORITY_TIEBREAK: Route[] = [
-    "tool_discovery", "app_build", "shell_run", "web", "research",
+    "tool_discovery", "deep_research", "app_build", "shell_run", "web", "research",
     "code_write", "code_read", "project", "respond",
   ];
   for (const route of PRIORITY_TIEBREAK) {

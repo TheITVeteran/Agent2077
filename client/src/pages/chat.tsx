@@ -20,10 +20,11 @@ import {
 import {
   Send, Square, Copy, Check, Bot, User, Wrench,
   Search, Code, Sparkles, Brain, MessageSquare, Loader2,
-  ListChecks, CircleDot, CheckCircle2, Circle, GitBranch,
-  Activity, Diff, X, ImagePlus, ArrowDown, FileText, Download,
+  GitBranch,
+  Diff, X, ImagePlus, ArrowDown, FileText, Download,
   RotateCcw, Trash2
 } from "lucide-react";
+import { ActivityRail } from "@/components/ActivityRail";
 
 interface Message {
   id: number;
@@ -160,6 +161,70 @@ function ImageLightbox({ src, alt, onClose }: { src: string; alt: string; onClos
         )}
       </div>
     </div>
+  );
+}
+
+// ── Context Usage Gauge (v16.74) ───────────────────────────────────────────
+// Small badge showing how much of the model's context window the current turn's
+// prompt consumes, e.g. "Context: 18.4k / 32k (56%)". Color bands:
+//   green <60 · yellow 60–80 · orange 80–90 · red >=90
+// Hides itself when metadata is unavailable or the window is unknown.
+interface ContextUsageData {
+  estimatedPromptTokens: number;
+  contextWindowTokens: number;
+  contextUsedPercent: number;
+  source: string;
+  detail?: string;
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1000) {
+    const k = n / 1000;
+    return `${k >= 100 ? Math.round(k) : k.toFixed(1)}k`;
+  }
+  return String(n);
+}
+
+function ContextGauge({ usage }: { usage: ContextUsageData }) {
+  if (!usage || !usage.contextWindowTokens || usage.contextWindowTokens <= 0) return null;
+
+  const pct = usage.contextUsedPercent;
+  const band =
+    pct >= 90 ? { text: "text-red-400", border: "border-red-500/40", bar: "bg-red-500" } :
+    pct >= 80 ? { text: "text-orange-400", border: "border-orange-500/40", bar: "bg-orange-500" } :
+    pct >= 60 ? { text: "text-yellow-400", border: "border-yellow-500/40", bar: "bg-yellow-500" } :
+                { text: "text-green-400", border: "border-green-500/40", bar: "bg-green-500" };
+
+  const label = `Context: ${formatTokens(usage.estimatedPromptTokens)} / ${formatTokens(usage.contextWindowTokens)} (${Math.round(pct)}%)`;
+  const sourceLabel = usage.source === "fallback"
+    ? "estimated (window unknown — using conservative fallback)"
+    : `window source: ${usage.source}${usage.detail ? ` (${usage.detail})` : ""}`;
+
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Badge
+            variant="outline"
+            data-testid="context-gauge"
+            className={`text-[10px] shrink-0 gap-1.5 ${band.border} ${band.text}`}
+          >
+            <span className="inline-block w-12 h-1.5 rounded-full bg-muted/40 overflow-hidden align-middle">
+              <span
+                className={`block h-full ${band.bar}`}
+                style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
+              />
+            </span>
+            {label}
+          </Badge>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="text-xs">
+          <div>{usage.estimatedPromptTokens.toLocaleString()} est. prompt tokens</div>
+          <div>{usage.contextWindowTokens.toLocaleString()} token context window</div>
+          <div className="text-muted-foreground mt-1">{sourceLabel}</div>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
 
@@ -318,6 +383,13 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
   const [steps, setSteps] = useState<any[]>([]);
   const [planSteps, setPlanSteps] = useState<PlanStep[]>([]);
   const [routingInfo, setRoutingInfo] = useState<any>(null);
+  const [contextUsage, setContextUsage] = useState<{
+    estimatedPromptTokens: number;
+    contextWindowTokens: number;
+    contextUsedPercent: number;
+    source: string;
+    detail?: string;
+  } | null>(null);
   const [pendingUserMessage, setPendingUserMessage] = useState<string | null>(null);
   const [iterationCount, setIterationCount] = useState(0);
   const [toolCallCount, setToolCallCount] = useState(0);
@@ -344,6 +416,7 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
   const [attachedFiles, setAttachedFiles] = useState<Array<{name: string, content: string, mimeType: string}>>([]);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [deepResearch, setDeepResearch] = useState(false); // Deep Research toggle (one-shot: resets after send)
   const [isNearBottom, setIsNearBottom] = useState(true);
   const [showJumpToPresent, setShowJumpToPresent] = useState(false);
   const { toast } = useToast();
@@ -457,6 +530,15 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
                 break;
               case "routing":
                 setRoutingInfo(event);
+                break;
+              case "context_usage":
+                setContextUsage({
+                  estimatedPromptTokens: event.estimatedPromptTokens,
+                  contextWindowTokens: event.contextWindowTokens,
+                  contextUsedPercent: event.contextUsedPercent,
+                  source: event.source,
+                  detail: event.detail,
+                });
                 break;
               case "plan":
                 if (event.steps && Array.isArray(event.steps)) {
@@ -577,6 +659,9 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
   const handleSend = useCallback(async (overrideMessage?: string) => {
     const msg = overrideMessage || inputRef.current?.value.trim() || "";
     if (!msg || streaming) return;
+    // Deep Research is one-shot: snapshot the toggle for this send, then reset.
+    const useDeepResearch = deepResearch;
+    if (deepResearch) setDeepResearch(false);
     if (inputRef.current) { inputRef.current.value = ""; }
     setInputEmpty(true);
     if (textareaRef.current) {
@@ -620,6 +705,7 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
         body: JSON.stringify({
           conversationId: convId,
           message: msg,
+          deepResearch: useDeepResearch || undefined,
           images: imageData.length > 0 ? imageData : undefined,
           attachments: attachedFiles.length > 0 ? attachedFiles : undefined,
         }),
@@ -667,6 +753,15 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
                 break;
               case "routing":
                 setRoutingInfo(event);
+                break;
+              case "context_usage":
+                setContextUsage({
+                  estimatedPromptTokens: event.estimatedPromptTokens,
+                  contextWindowTokens: event.contextWindowTokens,
+                  contextUsedPercent: event.contextUsedPercent,
+                  source: event.source,
+                  detail: event.detail,
+                });
                 break;
               case "content":
                 content += event.content;
@@ -828,7 +923,7 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
       refetch();
       queryClient.invalidateQueries({ queryKey: ["/api/conversations"] });
     }
-  }, [streaming, convId, navigate, refetch, attachedImages, attachedFiles]);
+  }, [streaming, convId, navigate, refetch, attachedImages, attachedFiles, deepResearch]);
 
   // Stable callbacks for MessageBubble — defined once so memo() comparator doesn't see new refs every render
   const handleBranch = useCallback((newConvId: number) => {
@@ -972,8 +1067,8 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
           <div className="text-primary font-medium text-sm">Drop files here</div>
         </div>
       )}
-      {/* Top bar: tool steps + routing info */}
-      {(steps.length > 0 || routingInfo) && (
+      {/* Top bar: tool steps + routing info + context usage gauge */}
+      {(steps.length > 0 || routingInfo || contextUsage) && (
         <div className="border-b border-border bg-card/50 px-4 py-2 flex items-center gap-2 overflow-x-auto">
           {steps.slice(-5).map((step, i) => (
             <Badge
@@ -989,11 +1084,14 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
               {step.label}
             </Badge>
           ))}
-          {routingInfo && (
-            <Badge variant="outline" className="text-[10px] shrink-0 ml-auto">
-              {routingInfo.model?.split("/").pop()} · {routingInfo.taskType}
-            </Badge>
-          )}
+          <div className="flex items-center gap-2 ml-auto shrink-0">
+            {contextUsage && <ContextGauge usage={contextUsage} />}
+            {routingInfo && (
+              <Badge variant="outline" className="text-[10px] shrink-0">
+                {routingInfo.model?.split("/").pop()} · {routingInfo.taskType}
+              </Badge>
+            )}
+          </div>
         </div>
       )}
 
@@ -1036,7 +1134,7 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
             </div>
           </div>
         ) : (
-          <div className="max-w-3xl mx-auto space-y-4 pb-4">
+          <div className="w-full max-w-4xl xl:max-w-5xl mx-auto space-y-4 pb-4">
             {messages.map(msg => (
               <MessageBubble
                 key={msg.id}
@@ -1056,14 +1154,16 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
               />
             )}
 
-            {/* Plan progress panel — shown while streaming if plan exists */}
-            {streaming && planSteps.length > 0 && (
-              <PlanProgress steps={planSteps} />
-            )}
-
-            {/* Live activity feed — shows what the agent is doing right now */}
-            {streaming && statusLog.length > 0 && (
-              <ActivityFeed entries={statusLog} />
+            {/* Activity rail — Odysseus-inspired live timeline of what the agent
+                is doing while not directly replying. Stays condensed after the
+                turn finishes so completed work doesn't dominate the transcript. */}
+            {(streaming || statusLog.length > 0 || planSteps.length > 0) && (
+              <ActivityRail
+                statusLog={statusLog}
+                steps={steps}
+                planSteps={planSteps}
+                streaming={streaming}
+              />
             )}
 
             {streaming && (
@@ -1157,7 +1257,7 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
 
       {/* Input area */}
       <div className="border-t border-border p-4">
-        <div className="max-w-3xl mx-auto">
+        <div className="w-full max-w-4xl xl:max-w-5xl mx-auto">
           {/* File attachments */}
           {attachedFiles.length > 0 && (
             <div className="flex gap-2 px-2 py-1 mb-1 flex-wrap">
@@ -1195,6 +1295,12 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
               ))}
             </div>
           )}
+          {deepResearch && (
+            <div className="flex items-center gap-1.5 px-2 py-1 mb-1 text-xs text-primary" data-testid="deep-research-banner">
+              <Search className="w-3 h-3" />
+              <span>Deep Research is ON — your next message will run a deliberate, multi-source research workflow.</span>
+            </div>
+          )}
           <div className="flex items-end gap-2">
             {/* Hidden image file input */}
             <input
@@ -1222,6 +1328,28 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
             >
               <ImagePlus className="w-4 h-4" />
             </Button>
+            <TooltipProvider delayDuration={300}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant={deepResearch ? "default" : "ghost"}
+                    size="icon"
+                    className={`h-9 w-9 shrink-0 ${deepResearch ? "ring-2 ring-primary/60" : ""}`}
+                    onClick={() => setDeepResearch(v => !v)}
+                    disabled={streaming}
+                    aria-pressed={deepResearch}
+                    aria-label="Deep Research"
+                    data-testid="toggle-deep-research"
+                  >
+                    <Search className="w-4 h-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  Deep Research{deepResearch ? " — ON (next message)" : ""}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
             <Textarea
               ref={inputRef}
               onChange={e => {
@@ -1251,95 +1379,6 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
             )}
           </div>
         </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Plan Progress Component ──────────────────────────────────────────
-function PlanProgress({ steps }: { steps: PlanStep[] }) {
-  return (
-    <div className="bg-card/80 border border-border rounded-lg p-3 mb-2" data-testid="plan-progress">
-      <div className="flex items-center gap-2 mb-2">
-        <ListChecks className="w-4 h-4 text-primary" />
-        <span className="text-xs font-medium text-foreground">Execution Plan</span>
-        <span className="text-[10px] text-muted-foreground ml-auto">
-          {steps.filter(s => s.status === "completed").length}/{steps.length} steps
-        </span>
-      </div>
-      <div className="space-y-1">
-        {steps.map((step, i) => {
-          const StepIcon = step.status === "completed"
-            ? CheckCircle2
-            : step.status === "running"
-            ? CircleDot
-            : Circle;
-          const color = step.status === "completed"
-            ? "text-green-400"
-            : step.status === "running"
-            ? "text-primary animate-pulse"
-            : "text-muted-foreground/50";
-
-          return (
-            <div key={i} className="flex items-center gap-2" data-testid={`plan-step-${i}`}>
-              <StepIcon className={`w-3.5 h-3.5 shrink-0 ${color}`} />
-              <span className={`text-[11px] ${
-                step.status === "completed" ? "text-muted-foreground line-through" :
-                step.status === "running" ? "text-foreground font-medium" :
-                "text-muted-foreground/70"
-              }`}>
-                {step.title}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// ── Activity Feed Component ───────────────────────────────────────
-function ActivityFeed({ entries }: { entries: Array<{ message: string; detail?: string; timestamp: number }> }) {
-  const feedRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight, behavior: "smooth" });
-  }, [entries.length]);
-
-  // Show last 8 entries
-  const visible = entries.slice(-8);
-
-  return (
-    <div className="bg-card/80 border border-border rounded-lg p-3 mb-2" data-testid="activity-feed">
-      <div className="flex items-center gap-2 mb-2">
-        <Activity className="w-4 h-4 text-primary animate-pulse" />
-        <span className="text-xs font-medium text-foreground">Working</span>
-      </div>
-      <div ref={feedRef} className="space-y-1 max-h-32 overflow-y-auto">
-        {visible.map((entry, i) => {
-          const isLatest = i === visible.length - 1;
-          return (
-            <div
-              key={`${entry.timestamp}-${i}`}
-              className={`flex items-center gap-2 text-[11px] transition-opacity duration-300 ${
-                isLatest ? "text-foreground" : "text-muted-foreground/60"
-              }`}
-              data-testid={`status-entry-${i}`}
-            >
-              {isLatest ? (
-                <Loader2 className="w-3 h-3 animate-spin text-primary shrink-0" />
-              ) : (
-                <CheckCircle2 className="w-3 h-3 text-green-400/60 shrink-0" />
-              )}
-              <span className={isLatest ? "font-medium" : ""}>{entry.message}</span>
-              {entry.detail && (
-                <span className="text-[10px] text-muted-foreground/50 truncate">
-                  {entry.detail}
-                </span>
-              )}
-            </div>
-          );
-        })}
       </div>
     </div>
   );
@@ -1586,7 +1625,7 @@ const MessageBubble = memo(function MessageBubble({
         </div>
       )}
 
-      <div className={`flex-1 max-w-[85%] min-w-0 overflow-hidden ${isUser ? "text-right" : ""}`}>
+      <div className={`flex-1 min-w-0 overflow-hidden ${isUser ? "max-w-[85%] text-right" : "max-w-full"}`}>
         {/* Metadata */}
         {!isUser && message.modelId && (
           <div className="flex items-center gap-2 mb-1">
@@ -1601,10 +1640,10 @@ const MessageBubble = memo(function MessageBubble({
           </div>
         )}
 
-        <div className={`inline-block text-sm rounded-lg px-3 py-2 max-w-full min-w-0 ${
+        <div className={`rounded-lg max-w-full min-w-0 ${
           isUser
-            ? "bg-primary text-primary-foreground ml-auto"
-            : "bg-card border border-border"
+            ? "inline-block text-sm px-3 py-2 bg-primary text-primary-foreground ml-auto"
+            : "block text-[15px] leading-relaxed px-5 py-4 bg-card border border-border"
         }`}>
           {isUser ? (
             <>

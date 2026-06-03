@@ -79,6 +79,9 @@ export function registerRoutes(server: http.Server, app: Express) {
   // ── Chat / Agent ──────────────────────────────────────────────────
   app.post("/api/chat", async (req: AuthRequest, res) => {
     const { conversationId, message, systemPrompt: bodySystemPrompt, images, attachments } = req.body;
+    // v16.74: Deep Research toggle. When true, the next message runs the
+    // deliberate multi-source research workflow. Absent/false → normal chat.
+    const deepResearch = req.body.deepResearch === true || req.body.mode === "deep_research";
     if (!message) return res.status(400).json({ error: "Message required" });
     if (typeof message === "string" && message.length > 50000) {
       return res.status(400).json({ error: "Message too long (max 50,000 characters)" });
@@ -168,6 +171,14 @@ export function registerRoutes(server: http.Server, app: Express) {
       console.log(`[Chat] Message: "${message.slice(0, 80)}..." | autoRouting=${autoRouting} | convId=${convId}`);
       const routing = await routeMessage(message, autoRouting, convId);
 
+      // v16.74: Deep Research forces the research task type so the research
+      // model + tool bundle + prompt module all line up. The deep_research
+      // route (set inside the agent loop via the deepResearch flag) then layers
+      // the deliberate multi-source workflow on top.
+      if (routing && deepResearch) {
+        routing.taskType = "research";
+      }
+
       if (!routing) {
         console.warn(`[Chat] No routing found — no enabled models available`);
         out.write(`data: ${JSON.stringify({ type: "error", content: "No models available. Add and enable models in Settings." })}\n\n`);
@@ -184,6 +195,12 @@ export function registerRoutes(server: http.Server, app: Express) {
         endpoint: routing.endpoint.name,
         confidence: routing.confidence,
       })}\n\n`);
+
+      // v16.74: tell the client Deep Research mode started (UI marker / status).
+      if (deepResearch) {
+        out.write(`data: ${JSON.stringify({ type: "deep_research", active: true })}\n\n`);
+        out.write(`data: ${JSON.stringify({ type: "status", message: "Deep Research started", detail: "Planning, multi-source search, and synthesis", timestamp: Date.now() })}\n\n`);
+      }
 
       // Ensure the selected model is loaded with preferred context length
       // This calls LM Studio's load API if needed — fast no-op if already loaded correctly
@@ -381,6 +398,7 @@ export function registerRoutes(server: http.Server, app: Express) {
         requestId,
         systemPrompt,
         plan: plan?.needsPlan ? plan : undefined,
+        deepResearch,
       });
     } catch (err: any) {
       console.error("[Chat] Error:", err);

@@ -296,6 +296,23 @@ export interface StreamChunk {
   finishReason?: string;
 }
 
+// Rough chars-per-token used to estimate token counts when a provider omits the
+// `usage` object (common for LM Studio / llama.cpp / Ollama streaming). Mirrors
+// agent-loop's CHARS_PER_TOKEN so analytics estimates stay consistent with the
+// context gauge.
+const EST_CHARS_PER_TOKEN = 4;
+
+/** Estimate prompt tokens from request messages + tool schemas (char/4 heuristic). */
+function estimateMessagesTokens(messages: ChatMessage[], tools?: ToolDefinition[]): number {
+  let chars = 0;
+  for (const msg of messages) {
+    chars += (msg.content || "").length;
+    if ((msg as any).tool_calls) chars += JSON.stringify((msg as any).tool_calls).length;
+  }
+  if (tools?.length) chars += JSON.stringify(tools).length;
+  return Math.max(1, Math.ceil(chars / EST_CHARS_PER_TOKEN));
+}
+
 // Track active AbortControllers per request so we can cancel from outside
 const activeRequests = new Map<string, AbortController>();
 
@@ -321,6 +338,8 @@ export async function chatCompletion(
     maxTokens?: number; // Only sent if explicitly set — otherwise LM Studio decides
     stream?: false;
     requestId?: string;
+    conversationId?: number; // Recorded into analytics metadata for per-conversation token usage
+    taskType?: string;       // Recorded into analytics for task-type distribution
   } = {}
 ): Promise<LLMResponse> {
   // ── OpenRouter balance floor pre-flight check ─────────────────────────────
@@ -446,10 +465,14 @@ export async function chatCompletion(
           eventType: "chat",
           modelId: model.modelId,
           endpointId: endpoint.id,
+          taskType: options.taskType,
           tokensIn: result.tokensIn,
           tokensOut: result.tokensOut,
           durationMs,
           success: true,
+          metadata: options.conversationId != null
+            ? JSON.stringify({ conversationId: options.conversationId })
+            : undefined,
         });
 
         // Bust balance cache after each completed request
@@ -502,6 +525,8 @@ export async function* chatCompletionStream(
     maxTokens?: number; // Only sent if explicitly set — otherwise LM Studio decides
     requestId?: string;
     signal?: AbortSignal; // Optional external abort signal (e.g. loop-level controller)
+    conversationId?: number; // Recorded into analytics metadata for per-conversation token usage
+    taskType?: string;       // Recorded into analytics for task-type distribution
   } = {}
 ): AsyncGenerator<StreamChunk> {
   // If an external abort signal is already fired, don't even start
@@ -529,6 +554,49 @@ export async function* chatCompletionStream(
   }
 
   const startTime = Date.now();
+
+  // ── Analytics state (function-scoped so it survives early consumer break) ──
+  // Many local OpenAI-compatible servers (LM Studio, llama.cpp, Ollama's OpenAI
+  // shim) do NOT emit a `usage` object in streaming responses. Without a fallback
+  // we'd record tokensIn=tokensOut=0 — and, worse, the previous implementation
+  // placed analyticsStore.record() AFTER the final `yield {type:"done"}`, so when
+  // the agent loop breaks out of its `for await` on "done" the generator is
+  // .return()'d and that code never ran. The net effect: zero analytics rows for
+  // any streamed chat. We now record from inside the generator (before yielding
+  // "done") via an idempotent helper, guaranteeing a row regardless of how the
+  // consumer exits.
+  let usageReported = false;
+  let estCompletionChars = 0; // accumulated visible content length for fallback estimate
+  let analyticsRecorded = false;
+  const estPromptTokens = estimateMessagesTokens(messages, options.tools);
+  const recordChatAnalytics = (tokensIn: number, tokensOut: number, success: boolean) => {
+    if (analyticsRecorded) return;
+    analyticsRecorded = true;
+    // Fall back to char/4 estimates when the provider omitted usage tokens.
+    const finalIn = tokensIn > 0 ? tokensIn : estPromptTokens;
+    const finalOut = tokensOut > 0 ? tokensOut : Math.max(1, Math.ceil(estCompletionChars / EST_CHARS_PER_TOKEN));
+    try {
+      analyticsStore.record({
+        eventType: "chat",
+        modelId: model.modelId,
+        endpointId: endpoint.id,
+        taskType: options.taskType,
+        tokensIn: finalIn,
+        tokensOut: finalOut,
+        durationMs: Date.now() - startTime,
+        success,
+        metadata: JSON.stringify({
+          ...(options.conversationId != null ? { conversationId: options.conversationId } : {}),
+          provider: endpoint.providerType ?? undefined,
+          endpoint: endpoint.name || endpoint.url,
+          estimated: !usageReported, // true when token counts are char/4 estimates
+          streamed: true,
+        }),
+      });
+    } catch (e: any) {
+      console.warn(`[LLM Client] failed to record chat analytics:`, e?.message);
+    }
+  };
 
   const streamBody: any = {
     model: model.modelId,
@@ -622,12 +690,13 @@ export async function* chatCompletionStream(
         yield { type: "error", content: `__OPENROUTER_CREDIT_EXHAUSTED__: ${errText.slice(0, 200)}` };
         return;
       }
+      recordChatAnalytics(0, 0, false);
       yield { type: "error", content: `LLM error (${res.status}): ${errText}` };
       return;
     }
 
     const reader = res.body?.getReader();
-    if (!reader) { yield { type: "error", content: "No response body" }; return; }
+    if (!reader) { recordChatAnalytics(0, 0, false); yield { type: "error", content: "No response body" }; return; }
 
     const decoder = new TextDecoder();
     let buffer = "";
@@ -670,6 +739,7 @@ export async function* chatCompletionStream(
               };
             }
             doneEmitted = true;
+            recordChatAnalytics(tokensIn, tokensOut, true);
             yield { type: "done", tokensIn, tokensOut, finishReason: "stop" };
           }
           continue;
@@ -682,6 +752,7 @@ export async function* chatCompletionStream(
           const finishReason = data.choices?.[0]?.finish_reason;
 
           if (data.usage) {
+            if (data.usage.prompt_tokens || data.usage.completion_tokens) usageReported = true;
             tokensIn = data.usage.prompt_tokens || tokensIn;
             tokensOut = data.usage.completion_tokens || tokensOut;
           }
@@ -704,7 +775,10 @@ export async function* chatCompletionStream(
 
           if (delta?.content) {
             const stripped = thinkStripper.process(delta.content);
-            if (stripped) yield { type: "content", content: stripped };
+            if (stripped) {
+              estCompletionChars += stripped.length;
+              yield { type: "content", content: stripped };
+            }
           }
 
           // Accumulate streaming tool calls
@@ -717,7 +791,10 @@ export async function* chatCompletionStream(
               const acc = accumulatedToolCalls.get(idx)!;
               if (tc.id) acc.id = tc.id;
               if (tc.function?.name) acc.name = tc.function.name; // Replace, not append — names arrive complete
-              if (tc.function?.arguments) acc.arguments += tc.function.arguments;
+              if (tc.function?.arguments) {
+                acc.arguments += tc.function.arguments;
+                estCompletionChars += tc.function.arguments.length; // count tool args toward completion estimate
+              }
             }
           }
 
@@ -738,6 +815,7 @@ export async function* chatCompletionStream(
               console.warn(`[LLM Client] Response truncated (finish_reason=length) — model hit output token limit`);
             }
             doneEmitted = true;
+            recordChatAnalytics(tokensIn, tokensOut, true);
             yield { type: "done", tokensIn, tokensOut, finishReason };
           }
         } catch { /* ignore malformed chunks */ }
@@ -762,18 +840,14 @@ export async function* chatCompletionStream(
           };
         }
       }
+      recordChatAnalytics(tokensIn, tokensOut, true);
       yield { type: "done", tokensIn, tokensOut, finishReason: "stream_drop" };
     }
 
-    // Record analytics
-    const durationMs = Date.now() - startTime;
-    analyticsStore.record({
-      eventType: "chat",
-      modelId: model.modelId,
-      endpointId: endpoint.id,
-      tokensIn, tokensOut, durationMs,
-      success: true,
-    });
+    // Safety net: if for any reason we reached here without recording (e.g. the
+    // stream ended cleanly but emitted neither [DONE] nor finish_reason and
+    // doneEmitted was somehow set elsewhere), record now. Idempotent.
+    recordChatAnalytics(tokensIn, tokensOut, true);
     // Bust balance cache after each completed request so the next
     // floor check always sees the actual post-request balance.
     if (isOpenRouterEndpoint(endpoint)) {
@@ -793,6 +867,7 @@ export async function* chatCompletionStream(
       await new Promise(r => setTimeout(r, waitMs));
       continue;
     }
+    recordChatAnalytics(0, 0, false);
     yield { type: "error", content: err.message };
     return;
   } finally {

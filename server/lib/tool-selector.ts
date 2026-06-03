@@ -64,6 +64,13 @@ const TASK_TYPE_BUNDLES: Record<string, string[]> = {
     "web_search", "fetch_url", "browse_url", "browse_search", "browse_extract", "browse_screenshot",
     "read_file", "list_files", "search_files",
   ],
+  // Deep Research: same research surface, but also keep memory + file-writing so
+  // the agent can stash interim findings and (optionally) write a report.
+  deep_research: [
+    "web_search", "fetch_url", "browse_url", "browse_search", "browse_extract", "browse_screenshot",
+    "read_file", "list_files", "search_files", "write_file",
+    "memory_recall", "memory_store",
+  ],
   creative: [
     "generate_image", "image_to_image", "upscale_image", "remove_background",
     "list_comfyui_models", "comfyui_status", "run_comfyui_workflow",
@@ -201,6 +208,15 @@ export function shouldIncludeAppModule(
 }
 
 /**
+ * Helper for the prompt module: is the Deep Research workflow active this turn?
+ * Driven solely by the route (which is forced by the chat-box toggle), never
+ * inferred from message text.
+ */
+export function shouldIncludeDeepResearchModule(route?: RouteDecision): boolean {
+  return route?.route === "deep_research";
+}
+
+/**
  * Helper for the prompt module: are SSH targets relevant this turn?
  */
 export function shouldIncludeSshModule(
@@ -330,7 +346,10 @@ export function selectTools(input: ToolSelectionInput): ToolSelectionResult {
   }
 
   // ── 4. Task-type defaults (bulk fill — yields to cap) ────────────────────
-  const bundle = TASK_TYPE_BUNDLES[input.taskType] || TASK_TYPE_BUNDLES.general;
+  // Deep Research is a route (forced by the chat-box toggle), not a TaskType,
+  // so prefer its richer bundle when that route is active.
+  const bundleKey = input.route?.route === "deep_research" ? "deep_research" : input.taskType;
+  const bundle = TASK_TYPE_BUNDLES[bundleKey] || TASK_TYPE_BUNDLES.general;
   for (const name of bundle) {
     if (isProjectMode && PROJECT_MODE_FORBIDDEN.has(name)) continue;
     if (selected.size >= cap) break;
