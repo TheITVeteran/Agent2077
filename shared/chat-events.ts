@@ -73,6 +73,11 @@ export type ChatStreamEvent =
       detail?: string;
     }
   | { type: "content"; content: string }
+  // Model-provided reasoning/thinking tokens (delta.reasoning / reasoning_content,
+  // or text inside <think>…</think>). Streamed separately from visible content so
+  // the UI can show it in a collapsible "thinking" panel without polluting the
+  // answer. Only ever carries text the model actually emitted — never fabricated.
+  | { type: "thinking"; content: string }
   | { type: "step"; label?: string; status?: string; detail?: string; [key: string]: any }
   | { type: "plan"; steps?: Array<{ step: number; title: string }> }
   | { type: "skill_proposal"; skill?: any; [key: string]: any }

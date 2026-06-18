@@ -491,6 +491,20 @@ function initNewTables() {
     );
   `);
 
+  // Create documents table if not exists (per-conversation chat document canvas)
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS documents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+      title TEXT NOT NULL DEFAULT 'Untitled',
+      content TEXT NOT NULL DEFAULT '',
+      format TEXT NOT NULL DEFAULT 'markdown',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+  sqlite.exec(`CREATE INDEX IF NOT EXISTS idx_documents_conversation ON documents(conversation_id);`);
+
   // Create comfyui_workflows table if not exists
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS comfyui_workflows (

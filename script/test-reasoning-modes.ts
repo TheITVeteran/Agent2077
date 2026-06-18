@@ -197,6 +197,52 @@ const model = { modelId: "gpt-5", thinkingEnabled: false } as unknown as Model;
     bOff.extra_body?.chat_template_kwargs?.enable_thinking === false);
 }
 
+// ── DeepSeek V4 Flash thinking presets (custom_json + extra_body) ───────────
+// Mirrors the REASONING_PRESETS definitions in client settings. The model
+// toggles thinking via chat_template_kwargs on extra_body; this verifies the
+// custom_json strategy carries that exact shape through to the request body.
+{
+  const deepseekHigh: ReasoningProfile = {
+    id: "ds-high", label: "DeepSeek V4 High", strategy: "custom_json",
+    customBody: { extra_body: { chat_template_kwargs: { thinking: true, preserve_thinking: true, reasoning_effort: "high" } } },
+  };
+  const deepseekMax: ReasoningProfile = {
+    id: "ds-max", label: "DeepSeek V4 Max", strategy: "custom_json",
+    customBody: { extra_body: { chat_template_kwargs: { thinking: true, preserve_thinking: true, reasoning_effort: "max" } } },
+  };
+
+  // Both presets must validate against the stored-profile schema.
+  check("DeepSeek presets validate against schema",
+    reasoningProfilesSchema.safeParse([deepseekHigh, deepseekMax]).success);
+
+  // High → extra_body.chat_template_kwargs.reasoning_effort === "high"
+  const bHigh: any = {};
+  applyReasoning(bHigh, [], localEp, model, deepseekHigh);
+  check("DeepSeek High → extra_body.chat_template_kwargs carries thinking flags",
+    bHigh.extra_body?.chat_template_kwargs?.thinking === true &&
+    bHigh.extra_body?.chat_template_kwargs?.preserve_thinking === true);
+  check("DeepSeek High → reasoning_effort=high",
+    bHigh.extra_body?.chat_template_kwargs?.reasoning_effort === "high");
+
+  // Max → extra_body.chat_template_kwargs.reasoning_effort === "max"
+  const bMax: any = {};
+  applyReasoning(bMax, [], localEp, model, deepseekMax);
+  check("DeepSeek Max → reasoning_effort=max",
+    bMax.extra_body?.chat_template_kwargs?.reasoning_effort === "max");
+
+  // The exact JSON the user supplied must be reproducible on the request body.
+  check("DeepSeek Max → body matches user's extra_body JSON exactly",
+    JSON.stringify({ extra_body: bMax.extra_body }) ===
+    JSON.stringify({ extra_body: { chat_template_kwargs: { thinking: true, preserve_thinking: true, reasoning_effort: "max" } } }));
+
+  // custom_json merges into (does not clobber) a pre-existing extra_body.
+  const bMerge: any = { extra_body: { existing: 1 } };
+  applyReasoning(bMerge, [], localEp, model, deepseekHigh);
+  check("DeepSeek preset merges into existing extra_body without clobbering",
+    bMerge.extra_body?.existing === 1 &&
+    bMerge.extra_body?.chat_template_kwargs?.reasoning_effort === "high");
+}
+
 if (failures > 0) {
   console.error(`\n${failures} TEST(S) FAILED`);
   process.exit(1);

@@ -540,6 +540,7 @@ registerTool("upscale_image", {
         try {
           generatedImageStore.create({
             filePath: fp,
+            prompt: "[upscale]",
             model: upscaleModel,
             generationType: "upscale",
             conversationId: (args._conversationId as number) ?? null,
@@ -631,6 +632,7 @@ registerTool("remove_background", {
         try {
           generatedImageStore.create({
             filePath: fp,
+            prompt: "[background removal]",
             model: rmbgNodeName!,
             generationType: "bg_removal",
             conversationId: (args._conversationId as number) ?? null,
@@ -736,6 +738,7 @@ registerTool("restore_faces", {
         try {
           generatedImageStore.create({
             filePath: fp,
+            prompt: "[face restoration]",
             model: nodeType!,
             generationType: "face_restore",
             conversationId: (args._conversationId as number) ?? null,

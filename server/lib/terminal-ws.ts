@@ -7,8 +7,10 @@
  * Falls back to spawn (no PTY) if node-pty is unavailable.
  */
 import type http from "http";
+import type { Duplex } from "stream";
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
-import { projectStore } from "../storage.js";
+import { projectStore, userStore } from "../storage.js";
+import { verifyToken } from "../middleware/auth.js";
 
 // We use placeholders until ws is loaded. setupTerminalWs loads it lazily.
 let WebSocketServer: any = null;
@@ -79,6 +81,115 @@ export function listTerminalSessions(projectId: number): { sessionId: string; pr
   return sessions;
 }
 
+/** Read a single cookie value from a raw `Cookie` header. */
+function readCookie(header: string, name: string): string | undefined {
+  for (const pair of header.split(";")) {
+    const eq = pair.indexOf("=");
+    if (eq === -1) continue;
+    if (pair.slice(0, eq).trim() === name) {
+      return decodeURIComponent(pair.slice(eq + 1).trim());
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Authenticate a terminal WebSocket upgrade using the SAME JWT scheme that
+ * protects the REST API (verifyToken in middleware/auth.ts). Express
+ * middleware does not run on raw `upgrade` events, so we must reproduce the
+ * cookie/Bearer token check here — otherwise the upgrade reaches the shell
+ * spawn with no authentication at all.
+ *
+ * Token sources (in priority order), mirroring requireAuth + the browser's
+ * automatic cookie behaviour on same-origin WS handshakes:
+ *   1. `Authorization: Bearer <jwt>` header (non-browser clients)
+ *   2. `agent2077_token` cookie (what the browser sends automatically)
+ *   3. `?token=<jwt>` query param (fallback for clients that can't set headers)
+ */
+function authenticateUpgrade(req: http.IncomingMessage): boolean {
+  let token: string | undefined;
+
+  const authHeader = req.headers.authorization;
+  if (authHeader?.startsWith("Bearer ")) {
+    token = authHeader.slice(7);
+  }
+
+  if (!token && req.headers.cookie) {
+    token = readCookie(req.headers.cookie, "agent2077_token");
+  }
+
+  if (!token && req.url) {
+    try {
+      const q = new URL(req.url, "http://localhost").searchParams.get("token");
+      if (q) token = q;
+    } catch { /* unparseable url — no token */ }
+  }
+
+  if (!token) return false;
+
+  const payload = verifyToken(token);
+  if (!payload) return false;
+
+  // Verify the user still exists (mirrors requireAuth).
+  return !!userStore.getById(payload.userId);
+}
+
+/**
+ * Validate the Origin header so that a random website the operator visits
+ * cannot open a cross-origin WebSocket to the local terminal (browsers permit
+ * cross-origin WS connection establishment, so cookies alone are insufficient).
+ *
+ * Rules:
+ *  - No Origin header → allow. Non-browser clients (CLI, tests, internal
+ *    tooling) omit Origin; browsers always send it. A browser CSRF-style attack
+ *    cannot suppress the Origin header, so its absence means "not a browser".
+ *  - Origin host === request Host → allow (true same-origin).
+ *  - Origin host is a recognised localhost / .local loopback alias → allow
+ *    (covers agent2077.local, devagent.local, 127.0.0.1, ::1 dev access).
+ *  - Anything else → reject.
+ */
+function isAllowedOrigin(req: http.IncomingMessage): boolean {
+  const origin = req.headers.origin;
+  if (!origin) return true; // non-browser client
+
+  let originHost: string;
+  try {
+    originHost = new URL(origin).hostname.toLowerCase();
+  } catch {
+    return false; // malformed Origin from a browser — reject
+  }
+
+  // Same-origin: the Origin host matches the host the request was sent to.
+  const hostHeader = req.headers.host || "";
+  const requestHost = hostHeader.split(":")[0].toLowerCase();
+  if (requestHost && originHost === requestHost) return true;
+
+  // Loopback / mDNS aliases used for local + dev access.
+  const localHosts = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+  if (localHosts.has(originHost)) return true;
+  if (originHost.endsWith(".local")) return true; // agent2077.local, devagent.local
+
+  return false;
+}
+
+/**
+ * Reject a WebSocket upgrade before any shell is spawned: write a minimal HTTP
+ * response with the given status, then destroy the socket.
+ */
+function rejectUpgrade(socket: Duplex, status: number, reason: string): void {
+  const statusText = status === 401 ? "Unauthorized" : "Forbidden";
+  try {
+    socket.write(
+      `HTTP/1.1 ${status} ${statusText}\r\n` +
+        "Connection: close\r\n" +
+        "Content-Length: 0\r\n" +
+        "\r\n",
+    );
+  } catch { /* socket may already be gone */ }
+  socket.destroy();
+  console.warn(`[Terminal] Rejected WS upgrade (${status}): ${reason}`);
+}
+
 /**
  * Set up the WebSocket server for terminal connections.
  * Handles /ws/terminal/:sessionId paths.
@@ -109,7 +220,17 @@ export function setupTerminalWs(httpServer: http.Server): void {
   httpServer.on("upgrade", (req, socket, head) => {
     const url = req.url || "";
     const match = url.match(/^\/ws\/terminal\/([^/?]+)/);
-    if (!match) return; // Not a terminal request — ignore
+    if (!match) return; // Not a terminal request — ignore (other WS handlers may own it)
+
+    // SECURITY: validate BEFORE handleUpgrade so no shell is ever spawned for an
+    // unauthenticated or cross-origin request. Origin is checked first so a
+    // hostile cross-site page cannot probe token validity.
+    if (!isAllowedOrigin(req)) {
+      return rejectUpgrade(socket, 403, `disallowed origin: ${req.headers.origin}`);
+    }
+    if (!authenticateUpgrade(req)) {
+      return rejectUpgrade(socket, 401, "missing or invalid auth token");
+    }
 
     wss.handleUpgrade(req, socket as any, head, (ws: any) => {
       wss.emit("connection", ws, req, match[1]);

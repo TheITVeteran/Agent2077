@@ -26,9 +26,9 @@ import { v4 as uuid } from "uuid";
 import fs from "fs";
 import path from "path";
 import type { Endpoint, Model, TaskType, ReasoningProfile } from "../../shared/schema.js";
-import { chatCompletionStream, cancelRequest, type ChatMessage, type ToolCall, type ToolDefinition } from "./llm-client.js";
+import { chatCompletionStream, chatCompletion, cancelRequest, registerLoopCanceller, unregisterLoopCanceller, type ChatMessage, type ToolCall, type ToolDefinition } from "./llm-client.js";
 import { cancelChildRequests } from "./sub-agent-executor.js";
-import { LoopDetector } from "./loop-detector.js";
+import { LoopDetector, BlockRepetitionDetector } from "./loop-detector.js";
 import { executeTool, getToolDefinitions, getToolDefinitionsByNames, getToolDescriptionsText, getAllTools, canParallelize, type AgentStep, type ToolContext } from "../tools/registry.js";
 import { messageStore, memoryStore, skillStore, analyticsStore, settingsStore, projectStore } from "../storage.js";
 import { getMemorySnapshot } from "../tools/memory-tools.js";
@@ -36,6 +36,7 @@ import { formatPlanForPrompt, type TaskPlan } from "./task-planner.js";
 import { selectTools, readSmartSelectionSetting, shouldIncludeAppModule, shouldIncludeSshModule, shouldIncludeDeepResearchModule } from "./tool-selector.js";
 import { routeRequest, decideToolChoice, type RouteDecision } from "./request-router.js";
 import { repairToolCall } from "./tool-call-repair.js";
+import { searchToolNames } from "../tools/tool-discovery.js";
 import { FailureClassifier } from "./failure-classifier.js";
 import { jsonrepair } from "jsonrepair";
 import type { Response } from "express";
@@ -765,8 +766,16 @@ export async function runAgentLoop(req: AgentRequest): Promise<void> {
     customPrompt: req.systemPrompt,
     deepResearch: req.deepResearch,
   });
-  if (firstTurnToolChoice === "none") {
-    console.log(`[AgentLoop] casual/non-actionable turn → tool_choice="none" for first iteration`);
+  // v16.74.22: when the turn is non-actionable, suppression is STICKY for the
+  // whole turn — not just iteration 1. Earlier, iteration 2+ silently flipped
+  // tool_choice back to "auto" and re-attached the tool schemas, so a plain
+  // chat/brainstorming turn could still get pushed into tool-calling on the
+  // second pass (and the forced-tool nudge below would order "call a tool NOW").
+  // For a suppressed turn we keep tool_choice "none" AND omit the tool schemas
+  // every iteration, and we skip the forced-tool nudge entirely (fix #1).
+  const suppressToolsForTurn = firstTurnToolChoice === "none";
+  if (suppressToolsForTurn) {
+    console.log(`[AgentLoop] casual/non-actionable turn → tools suppressed (tool_choice="none", schemas omitted) for ALL iterations`);
   }
 
   const selection = selectTools({
@@ -832,8 +841,49 @@ export async function runAgentLoop(req: AgentRequest): Promise<void> {
 
   // Determine tool calling strategy.
   // v16.73: use the selected subset rather than the full registry.
-  const tools = selection.definitions;
+  // v16.74.19: `tools` is mutable so that tools the model discovers mid-loop via
+  // tool_search/tool_list can be promoted into the live schema set (see
+  // promoteDiscoveredTools below). Without this, a native tool-calling model
+  // could find a tool but never call it — the schema was frozen for the turn.
+  let tools = selection.definitions;
   let useNativeToolCalling = model.supportsToolCalling && tools.length > 0;
+
+  // ── Tool promotion (v16.74.19) ────────────────────────────────────────────
+  // When the model runs tool_search("ssh")/tool_list, attach the matching
+  // registry tools to the live set so the NEXT model call can actually invoke
+  // them. This closes the "discovered but uncallable" dead-end that made the
+  // agent say it couldn't SSH unless the user spelled out "use the ssh tool".
+  function promoteDiscoveredTools(toolName: string, args: Record<string, any>): void {
+    let names: string[] = [];
+    if (toolName === "tool_search") {
+      names = searchToolNames(String(args?.query ?? ""), 12, typeof args?.category === "string" ? args.category : null);
+    } else if (toolName === "tool_list") {
+      // tool_list with a category → promote that whole category; otherwise skip
+      // (promoting all ~100 tools would blow the cap and defeat smart selection).
+      const cat = typeof args?.category === "string" ? args.category.toLowerCase() : null;
+      if (cat) {
+        for (const [name, h] of getAllTools()) {
+          if ((h.category as string)?.toLowerCase() === cat && !(h.checkFn && !h.checkFn())) names.push(name);
+        }
+      }
+    }
+    if (names.length === 0) return;
+    let added = 0;
+    // Allow a modest headroom over the per-model cap so discovery isn't blocked,
+    // but never let a broad tool_list explode the schema set.
+    const promotionCeiling = selection.cap + 8;
+    for (const name of names) {
+      if (selection.selectedNames.size >= promotionCeiling) break;
+      if (selection.selectedNames.has(name)) continue;
+      if (!getAllTools().has(name)) continue;
+      selection.selectedNames.add(name);
+      added++;
+    }
+    if (added > 0) {
+      tools = getToolDefinitionsByNames(selection.selectedNames);
+      console.log(`[AgentLoop] tool promotion: ${toolName} surfaced ${added} tool(s) → live set now ${tools.length}`);
+    }
+  }
   let nativeFailedOver = false;
 
   // ── Observability: prompt + tool sizing ───────────────────────────────
@@ -872,7 +922,11 @@ export async function runAgentLoop(req: AgentRequest): Promise<void> {
 
   // If model doesn't support native tool calling, inject tool descriptions into system prompt.
   // v16.73: only the SELECTED subset is described — not all ~102.
-  if (!useNativeToolCalling && tools.length > 0) {
+  // v16.74.22: on a suppressed/non-actionable turn, skip the prompted tool
+  // instructions too. For prompt-driven models, omitting schemas from
+  // streamOptions is not enough — the catalogue lives in the system prompt — so
+  // we must not inject it, keeping the turn genuinely tool-free.
+  if (!useNativeToolCalling && tools.length > 0 && !suppressToolsForTurn) {
     messages[0].content += buildPromptedToolInstructions(modelSize, selection.selectedNames);
   }
 
@@ -933,9 +987,15 @@ export async function runAgentLoop(req: AgentRequest): Promise<void> {
   const onClose = () => cancelLoop("Client disconnected");
   res.on("close", onClose);
 
+  // Register this loop's canceller so POST /api/chat/stop can halt the WHOLE loop
+  // (flip `cancelled`, abort the persistent loop controller), not just the single
+  // in-flight fetch. Without this, a stop that arrives during tool execution or
+  // between iterations is lost and generation silently resumes.
+  registerLoopCanceller(requestId, () => cancelLoop("Stopped by user"));
+
   const sendStep = (step: AgentStep) => {
     try {
-      res.write(`data: ${JSON.stringify({ type: "step", ...step })}\n\n`);
+      res.write(`data: ${JSON.stringify({ ...step, type: "step" })}\n\n`);
     } catch { /* client disconnected */ }
   };
 
@@ -1066,17 +1126,23 @@ export async function runAgentLoop(req: AgentRequest): Promise<void> {
       let streamRepeatAborted = false;
       let streamFullContent = ""; // Full accumulated content for paragraph-level repetition detection
       let paragraphRepeatCount = 0; // Count of repeated paragraphs seen in a row
+      const blockRepeatDetector = new BlockRepetitionDetector(); // repeated multi-line block detection
 
       const streamOptions: any = {
-        tools,
+        // v16.74.22: on a suppressed (non-actionable) turn, omit the tool
+        // schemas entirely — not just set tool_choice "none" — so the model
+        // cannot be tempted into tool calls on any iteration of this turn.
+        tools: suppressToolsForTurn ? [] : tools,
         temperature: getModelTemperature(model, taskType),
         requestId,
         signal: loopAbortController.signal, // persistent abort — stays aborted after stop
         conversationId,
         taskType,
         reasoning: req.reasoning ?? null,
-        // v16.75: suppress tool calls on the first iteration of a casual turn.
-        toolChoice: iteration === 1 ? firstTurnToolChoice : "auto",
+        // v16.75 + v16.74.22: suppress tool calls on a casual turn. Sticky for
+        // the whole turn when suppressToolsForTurn — earlier this only held for
+        // iteration 1 and flipped back to "auto" on iteration 2.
+        toolChoice: suppressToolsForTurn ? "none" : (iteration === 1 ? firstTurnToolChoice : "auto"),
       };
       const nativeTopP = getModelTopP(model);
       if (nativeTopP !== undefined) streamOptions.topP = nativeTopP;
@@ -1139,6 +1205,20 @@ export async function runAgentLoop(req: AgentRequest): Promise<void> {
             }
           }
 
+          // ── Block-level repetition detection ─────────────────────────
+          // Catches a medium/large multi-line block (heading + short list,
+          // a repeated paragraph, etc.) emitted verbatim many times — the
+          // case the char-level (8–40 char) and single-line (60+ char) guards
+          // both miss. See BlockRepetitionDetector.
+          if (blockRepeatDetector.push(chunk.content)) {
+            console.warn(`[AgentLoop] Block repetition loop detected — aborting stream`);
+            cancelRequest(requestId);
+            streamRepeatAborted = true;
+            sendStatus("Repetition detected — response cut off");
+            res.write(`data: ${JSON.stringify({ type: "content", content: "\n\n*[Response cut off: the model was repeating the same block of text over and over. Please re-send your message or try a different prompt.]*" })}\n\n`);
+            break;
+          }
+
           iterContent += chunk.content;
           totalContent += chunk.content;
           res.write(`data: ${JSON.stringify({ type: "content", content: chunk.content })}\n\n`);
@@ -1148,6 +1228,12 @@ export async function runAgentLoop(req: AgentRequest): Promise<void> {
         // response. We accumulate them so the empty-response guard doesn't misfire.
         if (chunk.type === "thinking" && chunk.content) {
           iterThinkingContent += chunk.content;
+          // Forward reasoning to the client so the collapsible thinking panel can
+          // show the model's actual reasoning as it streams. This is real
+          // model-emitted reasoning_content — never fabricated.
+          try {
+            res.write(`data: ${JSON.stringify({ type: "thinking", content: chunk.content })}\n\n`);
+          } catch { /* client gone */ }
         }
         if (chunk.type === "tool_call" && chunk.toolCall) {
           iterToolCalls.push(chunk.toolCall as ToolCall);
@@ -1386,7 +1472,10 @@ export async function runAgentLoop(req: AgentRequest): Promise<void> {
 
         // If the model has produced text but zero tool calls so far, it planned
         // but never acted. Give it one strong nudge to start calling tools before giving up.
-        if (allToolCalls.length === 0 && iterContent.length > 50 && !cancelled) {
+        // v16.74.22: never fire this on a suppressed/non-actionable turn — the
+        // user was chatting/brainstorming, not asking for work, so ordering
+        // "call a tool NOW" is wrong (and tools are omitted anyway).
+        if (!suppressToolsForTurn && allToolCalls.length === 0 && iterContent.length > 50 && !cancelled) {
           console.log(`[AgentLoop] Model wrote a plan but called no tools — sending strong tool nudge`);
           sendStatus("Starting work...");
           messages.push({ role: "assistant", content: iterContent || null });
@@ -1644,6 +1733,12 @@ export async function runAgentLoop(req: AgentRequest): Promise<void> {
         const result = await executeTool(toolCall.function.name, args, toolContext);
         allToolResults.push({ name: toolCall.function.name, ...result });
 
+        // v16.74.19: if the model just browsed the catalogue, attach the
+        // matching tools to the live set so it can call them next iteration.
+        if (result.success && (toolCall.function.name === "tool_search" || toolCall.function.name === "tool_list")) {
+          promoteDiscoveredTools(toolCall.function.name, args);
+        }
+
         // Loop detection
         const loopStatus = loopDetector.record(toolCall.function.name, args);
         if (loopStatus === 'critical') {
@@ -1792,6 +1887,7 @@ export async function runAgentLoop(req: AgentRequest): Promise<void> {
       let promptedRepeatAborted = false;
       let promptedFullContent = ""; // Full accumulated content for paragraph-level repetition detection
       let promptedParagraphRepeatCount = 0; // Count of repeated paragraphs seen in a row
+      const promptedBlockRepeatDetector = new BlockRepetitionDetector(); // repeated multi-line block detection
 
       for await (const chunk of chatCompletionStream(endpoint, model, messages, streamOptions)) {
         if (promptedRepeatAborted) break;
@@ -1845,6 +1941,16 @@ export async function runAgentLoop(req: AgentRequest): Promise<void> {
             }
           }
 
+          // ── Block-level repetition detection (prompted mode) ──────────
+          if (promptedBlockRepeatDetector.push(chunk.content)) {
+            console.warn(`[AgentLoop] Block repetition loop detected (prompted) — aborting stream`);
+            cancelRequest(requestId);
+            promptedRepeatAborted = true;
+            sendStatus("Repetition detected — response cut off");
+            res.write(`data: ${JSON.stringify({ type: "content", content: "\n\n*[Response cut off: the model was repeating the same block of text over and over. Please re-send your message or try a different prompt.]*" })}\n\n`);
+            break;
+          }
+
           responseText += chunk.content;
           streamBuffer += chunk.content;
 
@@ -1882,6 +1988,12 @@ export async function runAgentLoop(req: AgentRequest): Promise<void> {
             }
           }
           // If insideToolCall, just keep buffering silently
+        }
+        if (chunk.type === "thinking" && chunk.content) {
+          // Forward reasoning to the collapsible thinking panel (prompted path).
+          try {
+            res.write(`data: ${JSON.stringify({ type: "thinking", content: chunk.content })}\n\n`);
+          } catch { /* client gone */ }
         }
         if (chunk.type === "error") {
           if (chunk.content === "Request cancelled") {
@@ -2115,7 +2227,8 @@ Continue from where you left off, but with ONE tool call only.`
         }
 
         // Same strong tool nudge for prompted path
-        if (allToolCalls.length === 0 && cleanText.length > 50 && !cancelled) {
+        // v16.74.22: gated on suppressToolsForTurn for the same reason as the native path.
+        if (!suppressToolsForTurn && allToolCalls.length === 0 && cleanText.length > 50 && !cancelled) {
           console.log(`[AgentLoop] Prompted: model wrote plan but called no tools — sending strong tool nudge`);
           sendStatus("Starting work...");
           messages.push({ role: "assistant", content: responseText });
@@ -2267,6 +2380,12 @@ Continue from where you left off, but with ONE tool call only.`
         const result = await executeTool(tc.name, tc.arguments, toolContext);
         allToolResults.push({ name: tc.name, ...result });
 
+        // v16.74.19: promote tools discovered via the prompted-fallback path too,
+        // so the injected tool descriptions on the next turn include them.
+        if (result.success && (tc.name === "tool_search" || tc.name === "tool_list")) {
+          promoteDiscoveredTools(tc.name, tc.arguments || {});
+        }
+
         // Loop detection
         const loopStatusP = loopDetector.record(tc.name, tc.arguments);
         if (loopStatusP === 'critical') {
@@ -2378,8 +2497,9 @@ Continue from where you left off, but with ONE tool call only.`
 
   console.log(`[AgentLoop] ${cancelled ? 'Cancelled' : 'Completed'}: ${iteration} iteration(s), ${allToolCalls.length} tool calls, ${totalContent.length} chars of content${nativeFailedOver ? ' (switched to prompted mode mid-conversation)' : ''}`);
 
-  // Clean up client disconnect listener
+  // Clean up client disconnect listener + loop canceller registration
   res.removeListener("close", onClose);
+  unregisterLoopCanceller(requestId);
 
   if (!cancelled && iteration >= budget.maxBudget) {
     const warning = "\n\n[Agent reached maximum iteration limit — stopping here]";
@@ -2785,7 +2905,8 @@ function buildSystemPrompt(
     `- Every tool call must include all required parameters with real values. Never send empty arguments \`{}\`.\n` +
     `- If a tool fails, read the error and try a different approach. Do not repeat the same failing call.\n` +
     `- After receiving tool results, either call another tool or send a text response — never an empty turn.\n` +
-    `- Only a relevant subset of tools is pre-loaded each turn. If you need a tool that isn't visible, call tool_search("keyword") or tool_list to browse the full catalogue.`
+    `- Only a relevant subset of tools is pre-loaded each turn. If you need a tool that isn't visible, call tool_search("keyword") or tool_list to browse the full catalogue. Once you discover a tool this way it becomes callable on your next turn.\n` +
+    `- IMPORTANT: Before telling the user you cannot do something that sounds like an available capability — running a command on a remote machine over SSH, deploying an app, browsing the web, generating an image, or using a connected external tool — you MUST first call tool_search with a relevant keyword (e.g. tool_search("ssh"), tool_search("remote"), tool_search("deploy")) to check whether a tool exists. Never claim a capability is missing, and never improvise a workaround, until tool_search has returned no match.`
   );
 
   // ── 2. PLAN BLOCK ────────────────────────────────────────────────────────

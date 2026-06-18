@@ -1,5 +1,5 @@
 /**
- * Chat image-upload smoke test (v16.74.15 chat standardization).
+ * Chat image-upload smoke test (v16.74.24 chat standardization).
  *
  * The chat standardization refactor moved the SSE parse loop + message bubble
  * into shared modules (useChatStream, ChatMessageBubble, chat-markdown). This

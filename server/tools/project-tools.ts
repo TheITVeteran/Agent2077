@@ -212,7 +212,6 @@ registerTool("run_project_command", {
         maxBuffer: 1024 * 1024 * 20, // 20MB raw buffer — we truncate ourselves
         encoding: "utf-8",
         env: resolveNodeEnv(),
-        shell: true,
       });
       const trimmed = truncate(output, "output");
       return { success: true, output: trimmed || "(command completed with no output)" };
@@ -335,7 +334,6 @@ registerTool("search_project_files", {
         maxBuffer: 1024 * 1024 * 5,
         encoding: "utf-8",
         env: resolveNodeEnv(),
-        shell: true,
       });
 
       if (!output || !output.trim()) {

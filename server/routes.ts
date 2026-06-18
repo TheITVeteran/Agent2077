@@ -8,7 +8,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import {
-  conversationStore, messageStore, endpointStore, modelStore,
+  conversationStore, messageStore, documentStore, endpointStore, modelStore,
   skillStore, appStore, benchmarkStore, analyticsStore,
   memoryStore, settingsStore, taskPlanStore, chatGroupStore, projectStore,
   mcpServerStore, backgroundTaskStore, generatedImageStore, workflowStore,
@@ -26,7 +26,7 @@ import { runAgentLoop, resolveConfirmation } from "./lib/agent-loop.js";
 import { getRecentLogs, addLogClient, removeLogClient } from "./lib/log-buffer.js";
 import { getRecentInspectorEntries, addInspectorClient, removeInspectorClient } from "./lib/inspector.js";
 import { planTask, type TaskPlan } from "./lib/task-planner.js";
-import { syncModels, pingEndpoint, cancelRequest, type ChatMessage } from "./lib/llm-client.js";
+import { syncModels, pingEndpoint, cancelRequest, stopRequest, type ChatMessage } from "./lib/llm-client.js";
 import { dockerManager } from "./docker/manager.js";
 import { registerAppPort, unregisterAppPort } from "./lib/nginx-apps.js";
 import { DB_PATH } from "./db.js";
@@ -436,6 +436,13 @@ export function registerRoutes(server: http.Server, app: Express) {
   app.post("/api/chat/stop", (req, res) => {
     const { requestId } = req.body;
     if (requestId) {
+      // stopRequest() halts the entire agent loop (flips its cancelled flag +
+      // aborts the persistent loop controller) via the registered canceller,
+      // falling back to a bare fetch-abort if no loop is registered. This is
+      // what makes Stop reliable even when it lands during tool execution.
+      stopRequest(requestId);
+      // Also abort the current in-flight fetch immediately (the loop canceller
+      // does this too, but call it directly so a mid-stream stop is instant).
       cancelRequest(requestId);
       // Also cancel any sub-agents that were spawned by this request
       cancelChildRequests(requestId);
@@ -554,9 +561,46 @@ export function registerRoutes(server: http.Server, app: Express) {
     res.json(messageStore.getByConversation(parseInt(req.params.id)));
   });
 
+  // ── Per-conversation document canvas ──────────────────────────────
+  // Get the conversation's document (returns null if none yet).
+  app.get("/api/conversations/:id/document", (req, res) => {
+    const convId = parseInt(req.params.id);
+    if (isNaN(convId)) return res.status(400).json({ error: "Invalid conversation id" });
+    const doc = documentStore.getByConversation(convId);
+    res.json(doc ?? null);
+  });
+
+  // Upsert (create-or-replace) the conversation's document.
+  app.put("/api/conversations/:id/document", requireAuth, (req, res) => {
+    const convId = parseInt(String(req.params.id));
+    if (isNaN(convId)) return res.status(400).json({ error: "Invalid conversation id" });
+    if (!conversationStore.getById(convId)) return res.status(404).json({ error: "Conversation not found" });
+    const { title, content, format } = req.body ?? {};
+    const doc = documentStore.upsert(convId, {
+      ...(typeof title === "string" ? { title } : {}),
+      ...(typeof content === "string" ? { content } : {}),
+      ...(format === "markdown" || format === "text" ? { format } : {}),
+    });
+    res.json(doc);
+  });
+
+  // Download the conversation's document as a Markdown file.
+  app.get("/api/conversations/:id/document/download", (req, res) => {
+    const convId = parseInt(req.params.id);
+    if (isNaN(convId)) return res.status(400).json({ error: "Invalid conversation id" });
+    const doc = documentStore.getByConversation(convId);
+    if (!doc) return res.status(404).json({ error: "No document for this conversation" });
+    const ext = doc.format === "text" ? "txt" : "md";
+    const mime = doc.format === "text" ? "text/plain" : "text/markdown";
+    const safeName = (doc.title || "document").replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 80) || "document";
+    res.setHeader("Content-Type", `${mime}; charset=utf-8`);
+    res.setHeader("Content-Disposition", `attachment; filename="${safeName}.${ext}"`);
+    res.send(doc.content ?? "");
+  });
+
   // Delete a single message
   app.delete("/api/messages/:id", requireAuth, (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseInt(String(req.params.id));
     if (isNaN(id)) return res.status(400).json({ error: "Invalid message id" });
     messageStore.delete(id);
     res.json({ ok: true });
@@ -564,7 +608,7 @@ export function registerRoutes(server: http.Server, app: Express) {
 
   // Resend: delete all messages after this user message, client re-runs the agent
   app.post("/api/messages/:id/resend", requireAuth, async (req, res) => {
-    const msgId = parseInt(req.params.id);
+    const msgId = parseInt(String(req.params.id));
     if (isNaN(msgId)) return res.status(400).json({ error: "Invalid message id" });
 
     // Find the target message across all conversations
@@ -1631,7 +1675,7 @@ export function registerRoutes(server: http.Server, app: Express) {
 
   app.post("/api/projects/:id/upload", upload.array("files", 200), (req, res) => {
     try {
-      const project = projectStore.getById(parseInt(req.params.id));
+      const project = projectStore.getById(parseInt(String(req.params.id)));
       if (!project) return res.status(404).json({ error: "Project not found" });
 
       const targetDir = (req.body.directory || "").replace(/\.\.\//g, "");
@@ -2647,6 +2691,10 @@ CMD ["node", "index.js"]`;
   // Uses the self-dev system prompt and routes to coding models
   app.post("/api/self-dev/chat", async (req: AuthRequest, res) => {
     const { message, images, attachments } = req.body;
+    // Reasoning/thinking mode chosen via the self-dev lightbulb. id is matched
+    // first, label is the fallback for auto-routed models (see resolveReasoningProfile).
+    const reasoningModeId: string | undefined = req.body.reasoningModeId;
+    const reasoningModeLabel: string | undefined = req.body.reasoningModeLabel;
     if (!message) return res.status(400).json({ error: "Message required" });
     if (typeof message === "string" && message.length > 50000) {
       return res.status(400).json({ error: "Message too long (max 50,000 characters)" });
@@ -2768,7 +2816,7 @@ CMD ["node", "index.js"]`;
 
       // Build messages array from conversation history
       const historyMsgs = messageStore.getByConversation(convId);
-      const chatMessages = historyMsgs.map((m) => {
+      const chatMessages: ChatMessage[] = historyMsgs.map((m) => {
         const messageContent = m.content || "";
         if (m.images) {
           try {
@@ -2778,7 +2826,7 @@ CMD ["node", "index.js"]`;
                 console.warn(`[SelfDev] Stripping ${imgs.length} image(s) — model ${routing.model.modelId} does not support vision`);
                 return { role: m.role as any, content: messageContent };
               }
-              const content: any[] = [{ type: "text", text: messageContent }];
+              const content: any = [{ type: "text", text: messageContent }];
               for (const img of imgs) {
                 content.push({ type: "image_url", image_url: { url: img.base64 } });
               }
@@ -2788,6 +2836,18 @@ CMD ["node", "index.js"]`;
         }
         return { role: m.role as any, content: messageContent };
       });
+
+      // Resolve the reasoning profile for the routed model (same as main chat).
+      // Off/unknown → null (no shaping). Failure must never crash a self-dev run.
+      let reasoning = null;
+      try {
+        reasoning = resolveReasoningProfile(routing.model as any, reasoningModeId, reasoningModeLabel);
+        if (reasoning) {
+          console.log(`[SelfDev] Reasoning mode: ${reasoning.label} (strategy=${reasoning.strategy})`);
+        }
+      } catch (e: any) {
+        console.warn(`[SelfDev] Failed to resolve reasoning profile:`, e?.message);
+      }
 
       markActive(convId);
       try {
@@ -2801,6 +2861,7 @@ CMD ["node", "index.js"]`;
           res: out,
           requestId,
           systemPrompt,
+          reasoning,
         });
       } finally {
         markInactive(convId);
@@ -2862,7 +2923,7 @@ CMD ["node", "index.js"]`;
   // consumes pending messages at each iteration boundary via getStream(convId),
   // so this just queues the message on the right conversation's stream.
   app.post("/api/conversations/:id/inject", async (req: AuthRequest, res) => {
-    const convId = parseInt(req.params.id, 10);
+    const convId = parseInt(String(req.params.id), 10);
     if (!Number.isFinite(convId)) {
       return res.status(400).json({ error: "invalid conversation id" });
     }

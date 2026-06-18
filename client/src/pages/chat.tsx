@@ -33,7 +33,9 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ActivityRail } from "@/components/ActivityRail";
+import { ThinkingPanel } from "@/components/ThinkingPanel";
 import { useChatStream } from "@/hooks/use-chat-stream";
+import { DocumentCanvas } from "@/components/DocumentCanvas";
 import type { ChatStreamEvent } from "@shared/chat-events";
 import { IMAGE_PATH_REGEX, MessageContentWithImages } from "@/components/chat-markdown";
 import { NEW_CHAT_EVENT } from "@/lib/new-chat";
@@ -192,6 +194,15 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
+// Readable, compact timestamp for a chat message. Falls back to empty string
+// when createdAt is missing or unparseable so the bubble never renders "Invalid Date".
+function formatMessageTime(createdAt?: string | null): string {
+  if (!createdAt) return "";
+  const d = new Date(createdAt);
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
 function ContextGauge({ usage }: { usage: ContextUsageData }) {
   if (!usage || !usage.contextWindowTokens || usage.contextWindowTokens <= 0) return null;
 
@@ -347,6 +358,10 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
     detail?: string;
   } | null>(null);
   const [pendingUserMessage, setPendingUserMessage] = useState<string | null>(null);
+  // Timestamps for the in-flight bubbles. Set once per turn (not recreated each
+  // render) so the streaming/pending bubbles show a stable, accurate send time.
+  const [pendingUserCreatedAt, setPendingUserCreatedAt] = useState<string>(() => new Date().toISOString());
+  const [streamingCreatedAt, setStreamingCreatedAt] = useState<string>(() => new Date().toISOString());
   const [iterationCount, setIterationCount] = useState(0);
   const [toolCallCount, setToolCallCount] = useState(0);
   const [nudgeInput, setNudgeInput] = useState("");
@@ -371,6 +386,11 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
   const [reasoningModeId, setReasoningModeId] = useState<string>("");
   const [isNearBottom, setIsNearBottom] = useState(true);
   const [showJumpToPresent, setShowJumpToPresent] = useState(false);
+  // Document canvas: right-side per-conversation Markdown doc panel (main chat).
+  const [showDocPanel, setShowDocPanel] = useState(false);
+  // Bumped whenever the agent edits the doc (a `document` tool step arrives) so
+  // the panel re-fetches the server-persisted content.
+  const [docRefreshKey, setDocRefreshKey] = useState(0);
   const { toast } = useToast();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -522,6 +542,7 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
   const {
     streaming,
     streamContent,
+    thinkingContent,
     statusLog,
     steps,
     planSteps,
@@ -790,6 +811,18 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
     }
   }, [steps.length]);
 
+  // When the agent edits the conversation's document via its tools, refresh the
+  // canvas (and auto-reveal it if hidden) so the user sees the change live.
+  useEffect(() => {
+    if (steps.length === 0) return;
+    const lastStep = steps[steps.length - 1];
+    const label = (lastStep?.label || "").toLowerCase();
+    if (label === "updated document" || label === "patched document" || label === "reading document") {
+      setDocRefreshKey(k => k + 1);
+      if (label !== "reading document") setShowDocPanel(true);
+    }
+  }, [steps.length]);
+
   const handleSend = useCallback(async (overrideMessage?: string) => {
     const typed = overrideMessage || inputRef.current?.value.trim() || "";
     // Allow sending with no text as long as something is attached (image or file),
@@ -808,6 +841,9 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
     }
     stream.reset();
     setRoutingInfo(null);
+    const now = new Date().toISOString();
+    setPendingUserCreatedAt(now);
+    setStreamingCreatedAt(now);
     setPendingUserMessage(msg);
     setIterationCount(0);
     setToolCallCount(0);
@@ -985,8 +1021,9 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
   };
 
   return (
+    <div className="flex h-full w-full min-w-0">
     <div
-      className="flex flex-col h-full relative"
+      className="flex flex-col h-full relative flex-1 min-w-0"
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
@@ -1078,7 +1115,8 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
             ))}
             {pendingUserMessage && (
               <MessageBubble
-                message={{ id: -2, role: "user", content: pendingUserMessage, createdAt: new Date().toISOString() }}
+                key="pending-user"
+                message={{ id: -2, role: "user", content: pendingUserMessage, createdAt: pendingUserCreatedAt }}
                 pendingImages={pendingImages}
                 onImageClick={handleImageClick}
               />
@@ -1096,15 +1134,22 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
               />
             )}
 
+            {/* Collapsible thinking-process window — shows model reasoning while
+                (and after) it streams, without polluting the answer bubble. */}
+            {(streaming || thinkingContent) && thinkingContent.trim() && (
+              <ThinkingPanel content={thinkingContent} streaming={streaming} />
+            )}
+
             {streaming && (
               <MessageBubble
+                key="streaming-assistant"
                 message={{
                   id: -1,
                   role: "assistant",
                   content: streamContent || "",
                   modelId: routingInfo?.model?.split("/").pop(),
                   taskType: routingInfo?.taskType,
-                  createdAt: new Date().toISOString(),
+                  createdAt: streamingCreatedAt,
                 }}
                 isStreaming
                 currentStatus={statusLog.length > 0 ? statusLog[statusLog.length - 1] : undefined}
@@ -1286,6 +1331,18 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
             >
               <ImagePlus className="w-4 h-4" />
             </Button>
+            <Button
+              variant={showDocPanel ? "default" : "ghost"}
+              size="icon"
+              className={`h-9 w-9 shrink-0 ${showDocPanel ? "ring-2 ring-primary/60" : ""}`}
+              onClick={() => setShowDocPanel(v => !v)}
+              disabled={convId == null}
+              title={convId == null ? "Open a conversation to use the document" : (showDocPanel ? "Hide document" : "Show document")}
+              aria-pressed={showDocPanel}
+              data-testid="chat-document-toggle"
+            >
+              <FileText className="w-4 h-4" />
+            </Button>
             <TooltipProvider delayDuration={300}>
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -1382,6 +1439,15 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
           </div>
         </div>
       </div>
+    </div>
+    {/* Right-side document canvas (main chat only, per-conversation) */}
+    {showDocPanel && convId != null && (
+      <DocumentCanvas
+        conversationId={convId}
+        refreshKey={docRefreshKey}
+        onClose={() => setShowDocPanel(false)}
+      />
+    )}
     </div>
   );
 }
@@ -1716,6 +1782,13 @@ const MessageBubble = memo(function MessageBubble({
         {/* Confidence badge */}
         {!isUser && message.confidence && (
           <ConfidenceBadge confidence={message.confidence} />
+        )}
+
+        {/* Timestamp — readable send/receive time, compact and always visible */}
+        {!isStreaming && formatMessageTime(message.createdAt) && (
+          <div className={`mt-0.5 text-[10px] text-muted-foreground/50 font-mono ${isUser ? "text-right" : ""}`}>
+            {formatMessageTime(message.createdAt)}
+          </div>
         )}
 
         {/* Actions */}

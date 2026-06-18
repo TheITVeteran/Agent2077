@@ -555,7 +555,6 @@ export function buildDev(): { success: boolean; output: string } {
       maxBuffer: 1024 * 1024 * 10,
       encoding: "utf-8",
       env: nodeEnv,
-      shell: true,
     });
     lastBuildResult = { success: true, output: output.slice(-3000), timestamp: new Date().toISOString() };
     // Build succeeded — clear error history, reset give-up counter, and auto-checkpoint
@@ -1418,7 +1417,6 @@ export async function* promoteDevToProduction(options: {
       timeout: 180000,
       stdio: "pipe",
       env: nodeEnv,
-      shell: true,
     });
     yield { type: "progress", message: "Build complete." };
   } catch (err: any) {
@@ -1492,7 +1490,7 @@ export async function* rollbackToRelease(releaseId: string): AsyncGenerator<{
   yield { type: "progress", message: "Building..." };
   try {
     const nodeEnv = resolveNodeEnv();
-    execSync("npx tsx script/build.ts", { cwd: AGENT_ROOT, timeout: 180000, stdio: "pipe", env: nodeEnv, shell: true });
+    execSync("npx tsx script/build.ts", { cwd: AGENT_ROOT, timeout: 180000, stdio: "pipe", env: nodeEnv });
   } catch (err: any) {
     const stdout = String(err.stdout || "").trim();
     const stderr = String(err.stderr || "").trim();

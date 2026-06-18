@@ -145,3 +145,159 @@ export class LoopDetector {
     this.history = [];
   }
 }
+
+/**
+ * Block-level repetition detector for streamed *assistant text*.
+ *
+ * The existing inline char-level guard in the agent loop only catches short
+ * repeated substrings (8–40 chars) inside a 400-char rolling window, and the
+ * paragraph guard only fires when a single line of 60+ chars recurs. Neither
+ * catches the pathological case from the bug report: a medium/large multi-line
+ * block (e.g. a "How I can help instead:" heading followed by a short numbered
+ * list) repeated verbatim many times. Each individual line is < 60 chars and
+ * the whole block is far longer than 40 chars, so it slips through both.
+ *
+ * This detector accumulates text and looks for a *tail-anchored periodic
+ * repetition*: a unit of `period` chars repeated back-to-back at the end of the
+ * buffer. It fires when that unit is large enough to be a real "block" and has
+ * repeated enough times to be pathological rather than a legitimate list.
+ *
+ * Designed to NOT false-trigger on:
+ *   - normal repeated short words / punctuation ("ok ok", "...") — the unit
+ *     must be >= MIN_BLOCK_PERIOD chars (those are left to the char-level guard).
+ *   - legitimate numbered/bulleted lists or code — list items and code lines
+ *     differ from one another, so they don't form an *exact* periodic repeat.
+ */
+export class BlockRepetitionDetector {
+  private buf = "";
+  /** Keep enough tail to hold several repeats of a large block. */
+  private readonly maxBuf = 16000;
+  /** Smallest repeating unit we treat as a "block" (chars). */
+  private readonly minPeriod: number;
+  /** Largest repeating unit we bother scanning for (chars). */
+  private readonly maxPeriod: number;
+  /** How many back-to-back repeats trigger detection. */
+  private readonly threshold: number;
+  private _tripped = false;
+
+  constructor(opts: { minPeriod?: number; maxPeriod?: number; threshold?: number } = {}) {
+    this.minPeriod = opts.minPeriod ?? 48;
+    this.maxPeriod = opts.maxPeriod ?? 4000;
+    this.threshold = opts.threshold ?? 4;
+  }
+
+  /** Whether detection has already fired (latched). */
+  get tripped(): boolean { return this._tripped; }
+
+  /**
+   * Feed a new content chunk. Returns true the first time a pathological
+   * block-repetition is detected. Latches: once tripped it keeps returning true.
+   */
+  push(chunk: string): boolean {
+    if (this._tripped) return true;
+    if (!chunk) return false;
+    this.buf += chunk;
+    if (this.buf.length > this.maxBuf) this.buf = this.buf.slice(-this.maxBuf);
+    if (this.detect()) {
+      this._tripped = true;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Scan the tail of the buffer for a period `p` whose last `threshold` copies
+   * are (near-)identical. We probe a set of candidate periods derived from the
+   * structure of the tail (newline-delimited blocks) plus a bounded numeric
+   * sweep, to stay O(buffer) rather than O(buffer^2).
+   */
+  private detect(): boolean {
+    const s = this.buf;
+    const n = s.length;
+    if (n < this.minPeriod * this.threshold) return false;
+
+    const candidates = this.candidatePeriods(s);
+    for (const p of candidates) {
+      if (p < this.minPeriod || p > this.maxPeriod) continue;
+      if (n < p * this.threshold) continue;
+      if (this.repeatCountAtTail(s, p) >= this.threshold) {
+        // A unit qualifies as a "block" if it spans multiple lines or is long.
+        const unit = s.slice(n - p);
+        const multiLine = unit.includes("\n");
+        if (multiLine || p >= 80) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Build candidate period lengths. The strongest signal for the bug case is
+   * the distance between repeated occurrences of the final line, so we anchor
+   * on newline boundaries; we also add a coarse numeric sweep as a fallback for
+   * single-line-but-long repeats.
+   */
+  private candidatePeriods(s: string): number[] {
+    const n = s.length;
+    const set = new Set<number>();
+
+    // Newline-anchored: gaps between the last newline and earlier identical-ish
+    // newline positions give natural block boundaries.
+    const nlPositions: number[] = [];
+    for (let i = n - 1; i >= 0 && nlPositions.length < 64; i--) {
+      if (s[i] === "\n") nlPositions.push(i);
+    }
+    // distance from each earlier newline to the last newline → candidate period
+    if (nlPositions.length >= 2) {
+      const last = nlPositions[0];
+      for (let k = 1; k < nlPositions.length; k++) {
+        set.add(last - nlPositions[k]);
+      }
+    }
+
+    // Coarse numeric sweep for non-newline-aligned repeats (capped for cost).
+    const hi = Math.min(this.maxPeriod, Math.floor(n / this.threshold));
+    for (let p = this.minPeriod; p <= hi; p += 8) set.add(p);
+
+    return Array.from(set);
+  }
+
+  /**
+   * How many consecutive copies of the trailing `p`-char unit sit at the end of
+   * `s`. Uses a small similarity tolerance so trivially-different whitespace or
+   * a stray token between copies doesn't reset the count — but stays strict
+   * enough that genuinely distinct list items / code lines don't match.
+   */
+  private repeatCountAtTail(s: string, p: number): number {
+    const n = s.length;
+    const unit = s.slice(n - p);
+    let count = 1;
+    let end = n - p;
+    while (end - p >= 0) {
+      const candidate = s.slice(end - p, end);
+      if (this.similar(candidate, unit)) {
+        count++;
+        end -= p;
+      } else {
+        break;
+      }
+    }
+    return count;
+  }
+
+  /** Near-equality: exact, or >=95% matching chars (cheap Hamming over equal length). */
+  private similar(a: string, b: string): boolean {
+    if (a === b) return true;
+    if (a.length !== b.length) return false;
+    let diff = 0;
+    const tol = Math.floor(a.length * 0.05);
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) { diff++; if (diff > tol) return false; }
+    }
+    return true;
+  }
+
+  reset(): void {
+    this.buf = "";
+    this._tripped = false;
+  }
+}

@@ -280,6 +280,8 @@ registerTool("deploy_app", {
     }
 
     let app: any = null;
+    // Hoisted so the catch block can reference it during failure cleanup.
+    let existing: ReturnType<typeof appStore.getByName> = undefined as any;
 
     try {
       // 1. For custom type, require a dockerfile upfront before touching the FS
@@ -294,7 +296,7 @@ registerTool("deploy_app", {
       let defaultPort: number;  // resolved after detection
 
       // 2. Check if an app with this name already exists — UPDATE instead of duplicate
-      const existing = appStore.getByName(name);
+      existing = appStore.getByName(name);
       let isUpdate = false;
       let oldVersion = 0;
 
@@ -328,11 +330,13 @@ registerTool("deploy_app", {
           }
         }
 
-        // Update the existing app record
+        // Update the existing app record. The dockerfile is detected later
+        // (step 5a) and written authoritatively at step 5; use a placeholder
+        // here just like the new-app path does.
         appStore.update(existing.id, {
           description,
           category,
-          dockerfile: dockerfileContent,
+          dockerfile: "",
           iconEmoji: icon,
           status: "building",
           version: newVersion as any,

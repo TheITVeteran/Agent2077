@@ -4,7 +4,7 @@
  * CENTER: Chat interface connected to /api/self-dev/chat via SSE
  * RIGHT:  File viewer for browsing dev workspace files
  */
-import { useState, useRef, useEffect, useCallback, Component, type ErrorInfo, type ReactNode } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo, Component, type ErrorInfo, type ReactNode } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -17,6 +17,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { ActivityRail } from "@/components/ActivityRail";
+import { ThinkingPanel } from "@/components/ThinkingPanel";
 import { useChatStream } from "@/hooks/use-chat-stream";
 import { MarkdownMessage } from "@/components/chat-markdown";
 import { ChatMessageBubble } from "@/components/ChatMessageBubble";
@@ -53,8 +54,12 @@ import {
   FolderOpen, FileText, Server, CheckCircle2,
   XCircle, Clock, Terminal, Code2, Wrench,
   ChevronRight, ChevronDown, Activity, Download, Shield,
-  Rocket, RotateCcw, Trash2, AlertTriangle, History, CheckCircle,
+  Rocket, RotateCcw, Trash2, AlertTriangle, History, CheckCircle, Lightbulb,
 } from "lucide-react";
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem,
+  DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 // ── Error Boundary ──────────────────────────────────────────────────
 
@@ -1115,6 +1120,35 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
   const [attachedImages, setAttachedImages] = useState<File[]>([]);
   const [pendingImages, setPendingImages] = useState<Array<{ name: string; base64: string; mimeType: string }>>([]);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string } | null>(null);
+  // Selected reasoning/thinking mode for this self-dev message (mirrors main chat
+  // lightbulb). Empty string = Off / default (no reasoning shaping).
+  const [reasoningModeId, setReasoningModeId] = useState<string>("");
+
+  // Enabled models — used to build the reasoning-mode list (same source the main
+  // chat lightbulb uses). Auto-routing means we don't know the exact model up
+  // front, so the server matches the chosen mode by id, then label.
+  const { data: allModels = [] } = useQuery<any[]>({
+    queryKey: ["/api/models"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/models`);
+      return res.json();
+    },
+  });
+  const reasoningModes = useMemo(() => {
+    const seen = new Map<string, { id: string; label: string }>();
+    for (const m of allModels) {
+      if (!m?.isEnabled || !m?.reasoningProfiles) continue;
+      let profiles: any[] = [];
+      try { profiles = JSON.parse(m.reasoningProfiles); } catch { continue; }
+      for (const p of profiles) {
+        if (p?.id && p?.label && !seen.has(p.label)) {
+          seen.set(p.label, { id: p.id, label: p.label });
+        }
+      }
+    }
+    return Array.from(seen.values());
+  }, [allModels]);
+  const activeReasoningLabel = reasoningModes.find(r => r.id === reasoningModeId)?.label;
 
   // Centralized SSE stream state (messages/ActivityRail/tool events). Self-dev's
   // bespoke mount-reconnect + after-reset paths drive the same state via the
@@ -1140,9 +1174,9 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
     },
   });
   const {
-    streaming, streamContent, statusLog, steps, planSteps,
+    streaming, streamContent, thinkingContent, statusLog, steps, planSteps,
     requestIdRef,
-    setStreaming, setStreamContent, setSteps, setPlanSteps, setStatusLog,
+    setStreaming, setStreamContent, setThinkingContent, setSteps, setPlanSteps, setStatusLog,
   } = stream;
   // Abort controller for the bespoke reconnect/after-reset SSE subscriptions
   // (the hook owns a separate internal controller for the primary send path).
@@ -1187,6 +1221,7 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
         abortRef.current = ctrl;
         setStreaming(true);
         setStreamContent("");
+        setThinkingContent("");
         setSteps([]);
         setPlanSteps([]);
         setStatusLog([]);
@@ -1213,6 +1248,7 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
                 const ev = JSON.parse(line);
                 if (ev.type === "request_id") { requestIdRef.current = ev.requestId; }
                 else if (ev.type === "chunk") { setStreamContent(p => p + (ev.content ?? "")); gotContent = true; }
+                else if (ev.type === "thinking") { setThinkingContent(p => p + (ev.content ?? "")); gotContent = true; }
                 else if (ev.type === "status") {
                   setStatusLog(p => [...p, { message: ev.message || ev.content || ev.label || "", detail: ev.detail, timestamp: ev.timestamp || Date.now() }]);
                 }
@@ -1298,6 +1334,7 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
     // Show streaming indicator immediately — agent is now running server-side
     setStreaming(true);
     setStreamContent("");
+    setThinkingContent("");
     setSteps([]);
     setPlanSteps([]);
     setStatusLog([{ message: "Resuming after reset decision...", timestamp: Date.now() }]);
@@ -1328,6 +1365,7 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
             const ev = JSON.parse(line);
             if (ev.type === "request_id") requestIdRef.current = ev.requestId;
             else if (ev.type === "chunk") setStreamContent(p => p + (ev.content ?? ""));
+            else if (ev.type === "thinking") setThinkingContent(p => p + (ev.content ?? ""));
             else if (ev.type === "status") setStatusLog(p => [...p, { message: ev.message || ev.content || ev.label || "", detail: ev.detail, timestamp: ev.timestamp || Date.now() }]);
             else if (ev.type === "step") setSteps(p => [...p, ev]);
             else if (ev.type === "plan" && Array.isArray(ev.steps)) {
@@ -1400,6 +1438,7 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
       // Clear all local chat state
       setStreaming(false);
       setStreamContent("");
+      setThinkingContent("");
       setSteps([]);
       setPlanSteps([]);
       setStatusLog([]);
@@ -1449,6 +1488,8 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
       body: {
         message: msg,
         images: imageData.length > 0 ? imageData : undefined,
+        reasoningModeId: reasoningModeId || undefined,
+        reasoningModeLabel: activeReasoningLabel || undefined,
       },
     });
 
@@ -1456,7 +1497,7 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
     setPendingImages([]);
     refetch();
     queryClient.invalidateQueries({ queryKey: ["/api/self-dev/conversation"] });
-  }, [input, streaming, attachedImages, refetch, stream]);
+  }, [input, streaming, attachedImages, refetch, stream, reasoningModeId, activeReasoningLabel]);
 
   const handleNudge = useCallback(async () => {
     const msg = nudgeInput.trim();
@@ -1664,7 +1705,7 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
         )}
 
         {/* Streaming assistant response */}
-        {(streaming || statusLog.length > 0) && (streamContent || steps.length > 0 || statusLog.length > 0 || planSteps.length > 0) && (
+        {(streaming || statusLog.length > 0) && (streamContent || steps.length > 0 || statusLog.length > 0 || planSteps.length > 0 || thinkingContent.trim()) && (
           <div className="flex gap-2.5">
             <div className="w-6 h-6 rounded-full bg-primary/20 border border-primary/30 flex items-center justify-center shrink-0 mt-0.5">
               <Bot className="w-3 h-3 text-primary" />
@@ -1677,6 +1718,11 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
                   planSteps={planSteps}
                   streaming={streaming}
                 />
+              )}
+              {(streaming || thinkingContent) && thinkingContent.trim() && (
+                <div className="mb-2">
+                  <ThinkingPanel content={thinkingContent} streaming={streaming} compact />
+                </div>
               )}
               {streamContent && (
                 <div className="bg-muted/30 border border-border/30 rounded-xl rounded-tl-sm px-3 py-2">
@@ -1781,6 +1827,50 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
             className="hidden"
             onChange={handleImageAttach}
           />
+          {/* Reasoning-mode lightbulb — same modes as the main chat selector. */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant={reasoningModeId ? "default" : "ghost"}
+                size="icon"
+                className={`h-10 w-9 shrink-0 ${reasoningModeId ? "ring-2 ring-yellow-500/60 text-yellow-300" : "text-muted-foreground hover:text-foreground"}`}
+                disabled={streaming}
+                aria-label="Reasoning mode"
+                title={activeReasoningLabel ? `Reasoning: ${activeReasoningLabel}` : "Reasoning mode"}
+                data-testid="selfdev-toggle-reasoning-mode"
+              >
+                <Lightbulb className="w-4 h-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-52">
+              <DropdownMenuLabel className="text-xs">Reasoning mode</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onClick={() => setReasoningModeId("")}
+                className="text-xs"
+                data-testid="selfdev-reasoning-mode-off"
+              >
+                <span className={reasoningModeId === "" ? "font-medium text-yellow-400" : ""}>Off / default</span>
+              </DropdownMenuItem>
+              {reasoningModes.length === 0 && (
+                <DropdownMenuItem disabled className="text-[10px] text-muted-foreground">
+                  No modes — add them in Settings → Models
+                </DropdownMenuItem>
+              )}
+              {reasoningModes.map(rm => (
+                <DropdownMenuItem
+                  key={rm.id}
+                  onClick={() => setReasoningModeId(rm.id)}
+                  className="text-xs"
+                  data-testid={`selfdev-reasoning-mode-${rm.id}`}
+                >
+                  <span className={reasoningModeId === rm.id ? "font-medium text-yellow-400" : ""}>{rm.label}</span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+
           <Button
             variant="ghost"
             size="icon"

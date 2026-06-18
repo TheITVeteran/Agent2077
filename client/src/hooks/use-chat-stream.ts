@@ -55,6 +55,8 @@ export interface UseChatStreamOptions {
 export interface UseChatStreamResult {
   streaming: boolean;
   streamContent: string;
+  /** Accumulated model reasoning/thinking for the in-flight turn (collapsible panel). */
+  thinkingContent: string;
   statusLog: ChatStatusEntry[];
   steps: ChatStep[];
   planSteps: ChatPlanStep[];
@@ -73,6 +75,7 @@ export interface UseChatStreamResult {
    */
   setStreaming: React.Dispatch<React.SetStateAction<boolean>>;
   setStreamContent: React.Dispatch<React.SetStateAction<string>>;
+  setThinkingContent: React.Dispatch<React.SetStateAction<string>>;
   setSteps: React.Dispatch<React.SetStateAction<ChatStep[]>>;
   setPlanSteps: React.Dispatch<React.SetStateAction<ChatPlanStep[]>>;
   setStatusLog: React.Dispatch<React.SetStateAction<ChatStatusEntry[]>>;
@@ -109,6 +112,7 @@ export function useChatStream(options: UseChatStreamOptions = {}): UseChatStream
 
   const [streaming, setStreaming] = useState(false);
   const [streamContent, setStreamContent] = useState("");
+  const [thinkingContent, setThinkingContent] = useState("");
   const [statusLog, setStatusLog] = useState<ChatStatusEntry[]>([]);
   const [steps, setSteps] = useState<ChatStep[]>([]);
   const [planSteps, setPlanSteps] = useState<ChatPlanStep[]>([]);
@@ -121,6 +125,8 @@ export function useChatStream(options: UseChatStreamOptions = {}): UseChatStream
   // Mirror of accumulated content so the parse loop stays synchronous and pages
   // can append (decline notices, errors) without a stale closure.
   const contentRef = useRef<string>("");
+  // Synchronous mirror of accumulated reasoning/thinking text.
+  const thinkingRef = useRef<string>("");
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
 
@@ -157,6 +163,8 @@ export function useChatStream(options: UseChatStreamOptions = {}): UseChatStream
   const reset = useCallback(() => {
     contentRef.current = "";
     setStreamContent("");
+    thinkingRef.current = "";
+    setThinkingContent("");
     setStatusLog([]);
     setSteps([]);
     setPlanSteps([]);
@@ -212,6 +220,10 @@ export function useChatStream(options: UseChatStreamOptions = {}): UseChatStream
               case "content":
                 contentRef.current += (event as any).content || "";
                 setStreamContent(contentRef.current);
+                break;
+              case "thinking":
+                thinkingRef.current += (event as any).content || "";
+                setThinkingContent(thinkingRef.current);
                 break;
               case "step":
                 setSteps(prev => [...prev, event as ChatStep]);
@@ -314,6 +326,7 @@ export function useChatStream(options: UseChatStreamOptions = {}): UseChatStream
   return {
     streaming,
     streamContent,
+    thinkingContent,
     statusLog,
     steps,
     planSteps,
@@ -325,6 +338,7 @@ export function useChatStream(options: UseChatStreamOptions = {}): UseChatStream
     setPendingConfirm,
     setStreaming,
     setStreamContent,
+    setThinkingContent,
     setSteps,
     setPlanSteps,
     setStatusLog,

@@ -21,7 +21,7 @@ registerTool("web_search", {
       },
     },
   },
-  async execute(args: { query: string; num_results?: number }, context: ToolContext): Promise<ToolResult> {
+  async execute(args: Record<string, any>, context: ToolContext): Promise<ToolResult> {
     // Internet Kill Switch
     const internetEnabled = settingsStore.get("internetEnabled");
     if (internetEnabled === "false") {
@@ -84,7 +84,7 @@ registerTool("fetch_url", {
       },
     },
   },
-  async execute(args: { url: string; max_length?: number }, context: ToolContext): Promise<ToolResult> {
+  async execute(args: Record<string, any>, context: ToolContext): Promise<ToolResult> {
     // Internet Kill Switch
     const internetEnabled = settingsStore.get("internetEnabled");
     if (internetEnabled === "false") {

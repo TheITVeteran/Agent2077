@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Card } from "@/components/ui/card";
 import { ActivityRail } from "@/components/ActivityRail";
+import { ThinkingPanel } from "@/components/ThinkingPanel";
 // CodeMirror 6
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from "@codemirror/view";
 import { EditorState } from "@codemirror/state";
@@ -27,6 +28,8 @@ import { markdown } from "@codemirror/lang-markdown";
 import { rust } from "@codemirror/lang-rust";
 import { cpp } from "@codemirror/lang-cpp";
 import { oneDark } from "@codemirror/theme-one-dark";
+import { clampChatWidth } from "@/lib/workspace-layout";
+
 /**
  * Pixel-based drag handle. onDragStart is called with the mouse position when
  * dragging begins; onDrag is called with the total delta from start during drag.
@@ -1130,6 +1133,7 @@ function WorkspaceChat({
   const {
     streaming,
     streamContent,
+    thinkingContent,
     statusLog,
     steps,
     planSteps,
@@ -1597,6 +1601,11 @@ function WorkspaceChat({
             streaming={streaming}
           />
 
+          {/* Collapsible thinking-process window — model reasoning, shared with main chat */}
+          {(streaming || thinkingContent) && thinkingContent.trim() && (
+            <ThinkingPanel content={thinkingContent} streaming={streaming} compact />
+          )}
+
           {/* Streaming assistant message */}
           {streaming && (
             <ChatMessageBubble
@@ -1970,6 +1979,9 @@ export default function WorkspacePage() {
   const [terminalHeight, setTerminalHeight] = useState(200);
   // Refs to snapshot size at drag start
   const dragStartRef = useRef({ fileTreeWidth: 200, chatWidth: 320, terminalHeight: 200 });
+  // The 3-panel layout container — measured (not window.innerWidth) so the chat
+  // clamp excludes the app's left navigation sidebar.
+  const layoutRef = useRef<HTMLDivElement>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false);
@@ -2475,11 +2487,12 @@ export default function WorkspacePage() {
         </div>
       </div>
 
-      {/* Main 3-panel layout: [File Tree] | [Editor + Terminal] | [Chat] — pixel-based resizable */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* Left: File Tree */}
+      {/* Main 3-panel layout: [Chat] | [Editor + Terminal] | [File Tree] — pixel-based resizable.
+          Flex `order-*` controls visual position while keeping the DOM/handlers intact. */}
+      <div ref={layoutRef} className="flex flex-1 overflow-hidden">
+        {/* Right: File Tree (order-5) */}
         <div
-          className="shrink-0 flex flex-col border-r border-border bg-card/30 overflow-hidden"
+          className="order-5 shrink-0 flex flex-col border-l border-border bg-card/30 overflow-hidden"
           style={{ width: fileTreeWidth }}
         >
           <div className="flex items-center justify-between px-2 py-1.5 border-b border-border/50">
@@ -2560,15 +2573,17 @@ export default function WorkspacePage() {
           {activeProjectId !== null && <GitPanel projectId={activeProjectId} />}
         </div>
 
-        {/* Drag handle: file tree ↔ editor */}
-        <DragHandle
-          direction="horizontal"
-          onDragStart={() => { dragStartRef.current.fileTreeWidth = fileTreeWidth; }}
-          onDrag={(delta) => setFileTreeWidth(Math.max(120, Math.min(500, dragStartRef.current.fileTreeWidth + delta)))}
-        />
+        {/* Drag handle: editor ↔ file tree (order-4 — file tree is now on the right) */}
+        <div className="order-4 flex">
+          <DragHandle
+            direction="horizontal"
+            onDragStart={() => { dragStartRef.current.fileTreeWidth = fileTreeWidth; }}
+            onDrag={(delta) => setFileTreeWidth(Math.max(120, Math.min(500, dragStartRef.current.fileTreeWidth - delta)))}
+          />
+        </div>
 
-        {/* Center: Editor + Terminal */}
-        <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+        {/* Center: Editor + Terminal (order-3) */}
+        <div className="order-3 flex-1 flex flex-col overflow-hidden min-w-0">
               {/* Tab bar */}
               {openTabs.length > 0 && (
                 <div
@@ -2697,16 +2712,26 @@ export default function WorkspacePage() {
         </div>
 
 
-        {/* Drag handle: editor ↔ chat */}
-        <DragHandle
-          direction="horizontal"
-          onDragStart={() => { dragStartRef.current.chatWidth = chatWidth; }}
-          onDrag={(delta) => setChatWidth(Math.max(200, Math.min(600, dragStartRef.current.chatWidth - delta)))}
-        />
+        {/* Drag handle: chat ↔ editor (order-2 — chat is now on the left).
+            Chat may grow up to ~2/3 of the available width, but never squeezes
+            the center editor below WORKSPACE_LAYOUT.editorMin. */}
+        <div className="order-2 flex">
+          <DragHandle
+            direction="horizontal"
+            onDragStart={() => { dragStartRef.current.chatWidth = chatWidth; }}
+            onDrag={(delta) => setChatWidth(
+              clampChatWidth(
+                dragStartRef.current.chatWidth + delta,
+                layoutRef.current?.clientWidth ?? window.innerWidth,
+                fileTreeWidth,
+              ),
+            )}
+          />
+        </div>
 
-        {/* Right: Workspace Chat */}
+        {/* Left: Workspace Chat (order-1) */}
         <div
-          className="shrink-0 flex flex-col border-l border-border overflow-hidden"
+          className="order-1 shrink-0 flex flex-col border-r border-border overflow-hidden"
           style={{ width: chatWidth }}
           data-testid="workspace-chat-panel"
         >

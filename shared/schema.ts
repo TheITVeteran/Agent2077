@@ -96,6 +96,17 @@ export const messages = sqliteTable("messages", {
   createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
 });
 
+// ── Documents (per-conversation chat document canvas) ───────────────
+export const documents = sqliteTable("documents", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  conversationId: integer("conversation_id").notNull().references(() => conversations.id),
+  title: text("title").notNull().default("Untitled"),
+  content: text("content").notNull().default(""),
+  format: text("format").notNull().default("markdown"), // markdown | text
+  createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
+  updatedAt: text("updated_at").notNull().$defaultFn(() => new Date().toISOString()),
+});
+
 // ── Task Plans ──────────────────────────────────────────────────────
 export const taskPlans = sqliteTable("task_plans", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -347,6 +358,7 @@ export const insertEndpointSchema = createInsertSchema(endpoints).omit({ id: tru
 export const insertModelSchema = createInsertSchema(models).omit({ id: true, createdAt: true });
 export const insertConversationSchema = createInsertSchema(conversations).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertMessageSchema = createInsertSchema(messages).omit({ id: true, createdAt: true });
+export const insertDocumentSchema = createInsertSchema(documents).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertTaskPlanSchema = createInsertSchema(taskPlans).omit({ id: true, createdAt: true });
 export const insertSubtaskSchema = createInsertSchema(subtasks).omit({ id: true, createdAt: true });
 export const insertSkillSchema = createInsertSchema(skills).omit({ id: true, createdAt: true, updatedAt: true, usageCount: true });
@@ -373,6 +385,8 @@ export type Conversation = typeof conversations.$inferSelect;
 export type InsertConversation = z.infer<typeof insertConversationSchema>;
 export type Message = typeof messages.$inferSelect;
 export type InsertMessage = z.infer<typeof insertMessageSchema>;
+export type Document = typeof documents.$inferSelect;
+export type InsertDocument = z.infer<typeof insertDocumentSchema>;
 export type TaskPlan = typeof taskPlans.$inferSelect;
 export type InsertTaskPlan = z.infer<typeof insertTaskPlanSchema>;
 export type Subtask = typeof subtasks.$inferSelect;

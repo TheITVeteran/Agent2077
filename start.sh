@@ -37,10 +37,17 @@ if ! command -v node &>/dev/null; then
     exit 1
 fi
 
-# ── Read LAN setting from database ─────────────────────────────────
+# ── Read LAN + port settings from database ─────────────────────────
+# The server resolves the port itself (PORT env → network.port setting → 5000);
+# we read network.port here only for an accurate banner. PORT env still wins.
 LAN_SERVING="false"
+HOST_PORT="${PORT:-5000}"
 if command -v sqlite3 &>/dev/null && [ -f "$DB_FILE" ]; then
     LAN_SERVING="$(sqlite3 "$DB_FILE" "SELECT value FROM settings WHERE key='network.lanServing' LIMIT 1;" 2>/dev/null || echo "false")"
+    if [ -z "${PORT:-}" ]; then
+        DB_PORT="$(sqlite3 "$DB_FILE" "SELECT value FROM settings WHERE key='network.port' LIMIT 1;" 2>/dev/null || echo "")"
+        [ -n "$DB_PORT" ] && HOST_PORT="$DB_PORT"
+    fi
 fi
 
 # ── Banner ─────────────────────────────────────────────────────────
@@ -49,10 +56,10 @@ echo -e "${BOLD}${CYAN}  AGENT2077${RESET}"
 echo ""
 
 if [ "$LAN_SERVING" = "true" ]; then
-    echo -e "  ${GREEN}●${RESET} LAN serving ${BOLD}ON${RESET}  — accessible at ${CYAN}http://agent2077.local${RESET}"
+    echo -e "  ${GREEN}●${RESET} LAN serving ${BOLD}ON${RESET}  — accessible at ${CYAN}http://agent2077.local:$HOST_PORT${RESET}"
     LISTEN_FLAG="--listen"
 else
-    echo -e "  ${YELLOW}●${RESET} LAN serving ${BOLD}OFF${RESET} — accessible at ${CYAN}http://localhost:5000${RESET} only"
+    echo -e "  ${YELLOW}●${RESET} LAN serving ${BOLD}OFF${RESET} — accessible at ${CYAN}http://localhost:$HOST_PORT${RESET} only"
     echo -e "    (Change this in Settings → Network, or re-run ./install.sh)"
     LISTEN_FLAG=""
 fi

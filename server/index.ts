@@ -28,6 +28,7 @@ import "./tools/web-search.js";
 import "./tools/code-execution.js";
 import "./tools/file-tools.js";
 import "./tools/memory-tools.js";
+import "./tools/document-tools.js";
 import "./tools/app-deploy.js";
 import "./tools/edit-file.js";
 import "./tools/read-project.js";
@@ -196,7 +197,12 @@ async function init() {
   // after we know whether to use HTTP or HTTPS. See the listen() block below.
 
   // ── Fix 6: Bind to localhost by default; opt-in to LAN via settings ──────────
-  const PORT = parseInt(process.env.PORT || "5000");
+  // Port resolution order: PORT env var (highest) → network.port setting (set via
+  // the installer or Settings UI) → 5000 default. env always wins so a one-off
+  // `PORT=… node dist/index.cjs` override works without touching the DB.
+  const portSetting = parseInt(settingsStore.get("network.port") || "");
+  const PORT = parseInt(process.env.PORT || "") ||
+    (Number.isInteger(portSetting) && portSetting > 0 ? portSetting : 5000);
   const lanServing = settingsStore.get("network.lanServing") === "true";
   const listenFlag = process.argv.includes("--listen");
   // --listen flag or LAN serving setting both bind to all interfaces

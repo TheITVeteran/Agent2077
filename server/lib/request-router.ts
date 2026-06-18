@@ -39,6 +39,7 @@ export type Route =
   | "code_write"
   | "app_build"
   | "shell_run"
+  | "document"
   | "project"
   | "unknown";
 
@@ -122,11 +123,49 @@ const RULES: Rule[] = [
   { route: "shell_run", weight: 45, reason: "command verbs",
     pattern: /\b(install|systemctl|docker|apt|pip|npm|yarn|curl|wget|tail|grep|chmod|chown)\s+\S+/i },
 
+  // ── document canvas ─────────────────────────────────────────────────────
+  // Editing/reading the right-side chat document. Phrases reference "the
+  // document" / "the doc" / "the canvas", or ask to write something up there.
+  // These patterns accept either article ("a"/"the"/none) and either an
+  // explicit preposition ("in/to/into/on the doc") or the doc-noun directly
+  // after the verb ("write up a doc", "make a document", "draft a doc"). The
+  // explicit-file guard in routeRequest() vetoes these when the user clearly
+  // means a workspace/project file ("save to workspace/foo.md", "create a
+  // file", "write a markdown file in the project", "export as a file").
+  { route: "document", weight: 75, reason: "write up / add to the document",
+    pattern: /\b(write|put|add|note|jot|save|capture|draft|start|begin|make|create)\b.{0,40}?\b(?:(?:in|to|into|on)\s+)?(?:a|the|this|my|our)?\s*(doc|document|canvas|notes?|write-?up|writeup)\b/i },
+  { route: "document", weight: 75, reason: "write it up (in a doc)",
+    pattern: /\bwrite\s+(?:this|it|that|them|these|all\s+(?:this|that))\s+up\b/i },
+  { route: "document", weight: 70, reason: "revise/edit/update the document",
+    pattern: /\b(revise|edit|update|rewrite|change|append\s+to|add\s+a\s+section\s+to|expand|extend|continue)\b.{0,25}?\b(?:a|the|this|my|our)?\s*(doc|document|canvas|write-?up|writeup)\b/i },
+  { route: "document", weight: 65, reason: "asks what's in the document",
+    pattern: /\b(what(?:'s| is| does)|show\s+me|read|open|display)\b.{0,25}?\b(?:the|this|my|our)?\s*(doc|document|canvas)\b/i },
+  { route: "document", weight: 55, reason: "section into the document",
+    pattern: /\badd\s+(a\s+)?(section|heading|paragraph|bullet|list)\b/i },
+
   // ── project follow-up ──────────────────────────────────────────────────
   // We can't see customPrompt from here — project bias is applied at call site.
 ];
 
 const PROJECT_CONTEXT_RX = /PROJECT CONTEXT/;
+
+// Explicit filesystem / workspace / project-export intent. When the user
+// clearly means a real file on disk — a path, an extension, the workspace or
+// project, or an "export to a file" — the right-side chat document canvas is
+// NOT what they want, so the `document` route is vetoed for the turn and the
+// request falls through to code_write / project / file tools. Kept narrow so
+// it only fires on unambiguous file language, never on plain "doc"/"document".
+const EXPLICIT_FILE_RX = new RegExp(
+  [
+    "[\\w./-]*/[\\w./-]+",                                   // a slash path (workspace/foo.md, ./src/x)
+    "[\\w.-]+\\.(md|txt|ts|tsx|js|jsx|py|rs|go|java|cs|cpp|c|h|sh|json|yaml|yml|toml|sql|html|css)\\b", // a filename.ext
+    "\\b(workspace|repo|repository|codebase|filesystem|disk)\\b", // explicit storage surface
+    "\\b(in|to|into|under|inside)\\s+(the\\s+)?project\\b",   // "...in the project"
+    "\\b(create|make|write|save|new)\\s+(a\\s+|an\\s+|the\\s+)?(file|markdown\\s+file|md\\s+file|text\\s+file)\\b", // "create a file"
+    "\\bexport\\b.{0,20}\\b(as\\s+|to\\s+)?(a\\s+)?file\\b",  // "export as a file"
+  ].join("|"),
+  "i",
+);
 
 const ROUTE_PREFERRED_CATEGORIES: Record<Route, string[]> = {
   respond:        [],
@@ -138,6 +177,7 @@ const ROUTE_PREFERRED_CATEGORIES: Record<Route, string[]> = {
   code_write:     ["file", "code"],
   app_build:      ["file", "code", "docker", "system"],
   shell_run:      ["system", "code"],
+  document:       ["file"],
   project:        ["file", "code", "system"],
   unknown:        [],
 };
@@ -151,7 +191,16 @@ const ROUTE_FORCE_INCLUDE: Record<Route, string[]> = {
   code_read:      [],
   code_write:     [],
   app_build:      [],
-  shell_run:      [],
+  // SSH / remote-shell intent: pre-load the remote tools so the agent doesn't
+  // fall back to "I can't SSH" or improvise. Only fires when the shell_run
+  // route actually matched (ssh/remote/on the server/dgx/run command) — casual
+  // turns route to respond/unknown, so tool suppression is unaffected.
+  shell_run:      ["ssh_exec", "ssh_list_targets", "shell_command"],
+  // Document-canvas intent: pre-load the doc tools so "write this up in the
+  // doc" / "what's in the document" deterministically selects them. Only fires
+  // when the document route matched (explicit doc/canvas phrasing) — casual
+  // turns route to respond/unknown, so tool suppression is unaffected.
+  document:       ["document_read", "document_write", "document_patch"],
   project:        [],
   unknown:        [],
 };
@@ -178,6 +227,10 @@ const ACTIONABLE_SIGNAL_RX = new RegExp(
     "\\b(create|make|build|write|edit|modify|update|change|fix|debug|refactor|implement|generate|add|remove|delete|rename|move|deploy|launch|install|run|execute|exec|start|stop|restart|search|find|look\\s*up|fetch|download|scrape|browse|open|read|show|list|inspect|analy[sz]e|compare|review|investigate|research|summari[sz]e|render|draw|paint|upscale|commit|push|pull|clone|test|check)\\b",
     // file / path / code references
     "\\b(file|files|folder|directory|repo|repository|codebase|project|function|class|module|component|endpoint|api|script|command|terminal|shell|server|database|table|query)\\b",
+    // chat document-canvas nouns — "rewrite the doc", "draft a doc with me"
+    // are actionable (they drive the document tools), so they must NOT be
+    // suppressed as casual chat even when short.
+    "\\b(doc|document|canvas|write-?up|writeup)\\b",
     "[\\w./-]+\\.(ts|tsx|js|jsx|py|rs|go|java|cs|cpp|c|h|sh|md|json|yaml|yml|toml|sql|html|css)\\b",
     // urls, backtick commands, code-fence
     "https?://\\S+",
@@ -305,6 +358,16 @@ export function routeRequest(
     }
   }
 
+  // Explicit-file veto: if the user clearly means a real file/path/workspace
+  // export, the chat document canvas is not the target — drop any `document`
+  // score so the turn falls through to code_write/project/file tools. We only
+  // veto when the document route would otherwise win on doc-noun phrasing; the
+  // explicit file language is unambiguous, so this never steals casual chat.
+  if (scores.has("document") && EXPLICIT_FILE_RX.test(msg)) {
+    scores.delete("document");
+    reasons.push("document vetoed: explicit file/workspace/path intent");
+  }
+
   if (inProject) {
     // PROJECT CONTEXT acts as a strong bias: project follow-ups should route
     // to the project surface unless the message is explicitly tool-discovery,
@@ -321,7 +384,7 @@ export function routeRequest(
   let bestScore = 0;
   const PRIORITY_TIEBREAK: Route[] = [
     "tool_discovery", "deep_research", "app_build", "shell_run", "web", "research",
-    "code_write", "code_read", "project", "respond",
+    "document", "code_write", "code_read", "project", "respond",
   ];
   for (const route of PRIORITY_TIEBREAK) {
     const s = scores.get(route) ?? 0;

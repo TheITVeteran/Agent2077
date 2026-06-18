@@ -112,6 +112,15 @@ const PROJECT_MODE_FORBIDDEN = new Set([
   "shell_command",
 ]);
 
+// Filesystem/project WRITE tools suppressed when the `document` route wins.
+// The chat document canvas is the intended target, so these must not compete
+// with document_write/document_patch. Read-only file tools are intentionally
+// NOT listed — the agent may still read context off disk while editing the doc.
+const DOC_ROUTE_SUPPRESSED = new Set([
+  "write_file", "edit_file", "create_file",
+  "write_project_file", "edit_project_file",
+]);
+
 // Project-mode preferred tool surface.
 const PROJECT_MODE_TOOLS = [
   "read_project", "list_project_files", "read_project_file",
@@ -128,6 +137,7 @@ const SSH_INTENT_RX = /\b(ssh|remote|server|dgx|sparks?|deploy(?:\s+to)?|infra|p
 const WEB_INTENT_RX = /\b(search|google|look\s*up|find\s+online|news|article|wikipedia|website|browse)\b/i;
 const APP_INTENT_RX = /\b(app|game|website|web\s*app|tool|dashboard|build|deploy|launch|create.*(app|game|site)|make.*(app|game))\b/i;
 const IMAGE_INTENT_RX = /\b(image|picture|photo|render|paint|draw|generate.*(image|picture|art)|comfyui|stable\s*diffusion)\b/i;
+const DOC_INTENT_RX = /\b(document|canvas|the\s+doc)\b/i;
 
 export interface ToolSelectionInput {
   allTools: Map<string, ToolHandler>;
@@ -350,6 +360,11 @@ export function selectTools(input: ToolSelectionInput): ToolSelectionResult {
       addIfRegistered("list_comfyui_models", "intent:image", input.allTools, selected, reasons, input.blockedTools);
       addIfRegistered("comfyui_status", "intent:image", input.allTools, selected, reasons, input.blockedTools);
     }
+    if (DOC_INTENT_RX.test(msg) && !isProjectMode) {
+      addIfRegistered("document_read", "intent:document", input.allTools, selected, reasons, input.blockedTools);
+      addIfRegistered("document_write", "intent:document", input.allTools, selected, reasons, input.blockedTools);
+      addIfRegistered("document_patch", "intent:document", input.allTools, selected, reasons, input.blockedTools);
+    }
   }
 
   // ── 4. Task-type defaults (bulk fill — yields to cap) ────────────────────
@@ -357,8 +372,17 @@ export function selectTools(input: ToolSelectionInput): ToolSelectionResult {
   // so prefer its richer bundle when that route is active.
   const bundleKey = input.route?.route === "deep_research" ? "deep_research" : input.taskType;
   const bundle = TASK_TYPE_BUNDLES[bundleKey] || TASK_TYPE_BUNDLES.general;
+  // Document-canvas route: the user wants the right-side chat document, not a
+  // workspace file. Suppress filesystem-write tools from the bulk bundle so the
+  // model can't satisfy "write up a doc" by writing to disk — the document_*
+  // tools (force-included above) are the only write surface. Read-only file
+  // tools stay available. The router's explicit-file veto already sends genuine
+  // file/path/workspace requests to a non-document route, so this never blocks a
+  // user who actually asked for a file.
+  const isDocRoute = input.route?.route === "document";
   for (const name of bundle) {
     if (isProjectMode && PROJECT_MODE_FORBIDDEN.has(name)) continue;
+    if (isDocRoute && DOC_ROUTE_SUPPRESSED.has(name)) continue;
     if (selected.size >= cap) break;
     addIfRegistered(name, `task:${input.taskType}`, input.allTools, selected, reasons, input.blockedTools);
   }

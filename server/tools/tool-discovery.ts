@@ -20,6 +20,71 @@ import { registerTool, getAllTools, type ToolResult } from "./registry.js";
 const CATEGORY_HINT =
   "Optional category filter. One of: search, code, file, docker, system, memory, skill, self-dev, image.";
 
+export interface ToolSearchHit {
+  name: string;
+  category: string;
+  description: string;
+  paramsSummary: string;
+  score: number;
+}
+
+/**
+ * Keyword-score the tool catalogue. Shared by the `tool_search` tool and the
+ * agent loop's tool-promotion path (so a tool the model discovers via
+ * tool_search can be attached to the next model call). Pure read of the
+ * registry — no side effects.
+ */
+export function searchToolHits(query: string, category?: string | null): ToolSearchHit[] {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return [];
+  const catFilter = category ? String(category).toLowerCase() : null;
+  const all = getAllTools();
+  const hits: ToolSearchHit[] = [];
+
+  for (const [name, handler] of all) {
+    if (handler.checkFn && !handler.checkFn()) continue;
+    const cat = (handler.category as string) || "other";
+    if (catFilter && cat.toLowerCase() !== catFilter) continue;
+    const desc = handler.definition.function.description || "";
+    const haystackName = name.toLowerCase();
+    const haystackDesc = desc.toLowerCase();
+    let score = 0;
+    if (haystackName === q) score += 100;
+    if (haystackName.includes(q)) score += 50;
+    if (haystackDesc.includes(q)) score += 20;
+    const tokens = q.split(/\s+/).filter(Boolean);
+    if (tokens.length > 1) {
+      let allTokensInDesc = true;
+      for (const t of tokens) {
+        if (!haystackDesc.includes(t) && !haystackName.includes(t)) { allTokensInDesc = false; break; }
+      }
+      if (allTokensInDesc) score += 30;
+    }
+    if (score === 0) continue;
+    const props = handler.definition.function.parameters?.properties || {};
+    const required = handler.definition.function.parameters?.required || [];
+    const paramLines = Object.entries(props).map(([k, v]: [string, any]) => {
+      const req = required.includes(k) ? " *required*" : "";
+      return `    - ${k} (${v.type})${req}: ${v.description || ""}`;
+    });
+    hits.push({
+      name,
+      category: cat,
+      description: desc,
+      paramsSummary: paramLines.length > 0 ? paramLines.join("\n") : "    (no parameters)",
+      score,
+    });
+  }
+
+  hits.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+  return hits;
+}
+
+/** Just the matching tool names, best-first. Used by tool promotion. */
+export function searchToolNames(query: string, limit = 10, category?: string | null): string[] {
+  return searchToolHits(query, category).slice(0, Math.max(1, limit)).map(h => h.name);
+}
+
 registerTool("tool_list", {
   category: "system",
   requiresApproval: false,
@@ -106,55 +171,12 @@ registerTool("tool_search", {
   },
   async execute(args): Promise<ToolResult> {
     try {
-      const q = String(args.query || "").trim().toLowerCase();
+      const q = String(args.query || "").trim();
       if (!q) return { success: false, output: "tool_search: `query` is required." };
       const catFilter = typeof args.category === "string" ? args.category.toLowerCase() : null;
       const limit = Math.min(Math.max(parseInt(String(args.limit ?? 10), 10) || 10, 1), 30);
 
-      const all = getAllTools();
-      type Hit = { name: string; category: string; description: string; paramsSummary: string; score: number };
-      const hits: Hit[] = [];
-
-      for (const [name, handler] of all) {
-        if (handler.checkFn && !handler.checkFn()) continue;
-        const cat = (handler.category as string) || "other";
-        if (catFilter && cat.toLowerCase() !== catFilter) continue;
-        const desc = handler.definition.function.description || "";
-        const haystackName = name.toLowerCase();
-        const haystackDesc = desc.toLowerCase();
-        let score = 0;
-        if (haystackName === q) score += 100;
-        if (haystackName.includes(q)) score += 50;
-        if (haystackDesc.includes(q)) score += 20;
-        // Also split the query into tokens for multi-word matches
-        const tokens = q.split(/\s+/).filter(Boolean);
-        if (tokens.length > 1) {
-          let allTokensInDesc = true;
-          for (const t of tokens) {
-            if (!haystackDesc.includes(t) && !haystackName.includes(t)) {
-              allTokensInDesc = false;
-              break;
-            }
-          }
-          if (allTokensInDesc) score += 30;
-        }
-        if (score === 0) continue;
-        const props = handler.definition.function.parameters?.properties || {};
-        const required = handler.definition.function.parameters?.required || [];
-        const paramLines = Object.entries(props).map(([k, v]: [string, any]) => {
-          const req = required.includes(k) ? " *required*" : "";
-          return `    - ${k} (${v.type})${req}: ${v.description || ""}`;
-        });
-        hits.push({
-          name,
-          category: cat,
-          description: desc,
-          paramsSummary: paramLines.length > 0 ? paramLines.join("\n") : "    (no parameters)",
-          score,
-        });
-      }
-
-      hits.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+      const hits = searchToolHits(q, catFilter);
       const top = hits.slice(0, limit);
 
       if (top.length === 0) {

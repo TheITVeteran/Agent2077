@@ -304,14 +304,45 @@ if [ $? -ne 0 ]; then
 fi
 echo "  ✓ Production build complete (dist/)"
 
-# ── 10. Create systemd service ─────────────────────────────────────
+# ── 10. Host port + optional systemd service ───────────────────────
 echo ""
-echo "[10/10] Creating systemd service..."
+echo "[10/10] Host port & service setup..."
 
-# Use the node binary path we captured earlier
+# ── Host port selection ─────────────────────────────────────────────
+# The server reads PORT from its environment and also honours a network.port
+# row in the settings DB. Pick it once here and thread it through.
+HOST_PORT="5000"
+while true; do
+    read -r -p "  Host port [5000]: " PORT_CHOICE
+    PORT_CHOICE="${PORT_CHOICE:-5000}"
+    if [[ "$PORT_CHOICE" =~ ^[0-9]+$ ]] && [ "$PORT_CHOICE" -ge 1 ] && [ "$PORT_CHOICE" -le 65535 ]; then
+        HOST_PORT="$PORT_CHOICE"
+        break
+    fi
+    echo "  Please enter a number between 1 and 65535."
+done
+echo "  ✓ Agent2077 will listen on port $HOST_PORT"
+
+DB_FILE="$INSTALL_DIR/data/agent2077.db"
+if command -v sqlite3 &>/dev/null && [ -f "$DB_FILE" ]; then
+    sqlite3 "$DB_FILE" "INSERT INTO settings(key, value, updated_at) VALUES('network.port', '$HOST_PORT', datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at;"
+    echo "  ✓ Port saved to database (network.port=$HOST_PORT)"
+fi
+
+# ── Optional systemd service (opt-in; no surprise auto-start) ────────
 echo "  Systemd will use: $NODE_BIN"
+INSTALL_SYSTEMD="false"
+while true; do
+    read -r -p "  Install + enable systemd auto-start service? [y/N] " SYSTEMD_CHOICE
+    case "${SYSTEMD_CHOICE,,}" in
+        y|yes) INSTALL_SYSTEMD="true"; break ;;
+        n|no|"") INSTALL_SYSTEMD="false"; break ;;
+        *) echo "  Please enter y or n." ;;
+    esac
+done
 
-sudo tee /etc/systemd/system/agent2077.service > /dev/null << SERVICEEOF
+if [ "$INSTALL_SYSTEMD" = "true" ]; then
+    sudo tee /etc/systemd/system/agent2077.service > /dev/null << SERVICEEOF
 [Unit]
 Description=Agent2077 AI Agent Platform
 After=network.target docker.service
@@ -322,7 +353,7 @@ Type=simple
 User=$USER
 WorkingDirectory=$INSTALL_DIR
 Environment=NODE_ENV=production
-Environment=PORT=5000
+Environment=PORT=$HOST_PORT
 Environment=HOST=0.0.0.0
 ExecStart=$NODE_BIN $INSTALL_DIR/dist/index.cjs
 Restart=always
@@ -334,9 +365,14 @@ StandardError=journal
 WantedBy=multi-user.target
 SERVICEEOF
 
-sudo systemctl daemon-reload
-sudo systemctl enable agent2077
-echo "  ✓ Systemd service created and enabled"
+    sudo systemctl daemon-reload
+    sudo systemctl enable agent2077
+    echo "  ✓ Systemd service created and enabled"
+else
+    echo "  ⚠ Skipping systemd — Agent2077 will NOT auto-start on boot."
+    echo "    Start manually with ./start.sh, or install later with:"
+    echo "    sudo systemctl daemon-reload && sudo systemctl enable --now agent2077"
+fi
 
 # ── Summary ─────────────────────────────────────────────────────────
 echo ""
@@ -348,14 +384,17 @@ echo "  Access: http://Agent2077.local"
 echo "  Login:  Agent2077 / Agent2077"
 echo ""
 echo "  Start now:"
-echo "    sudo systemctl start agent2077"
+echo "    ./start.sh"
+if [ "$INSTALL_SYSTEMD" = "true" ]; then
+echo "    — or — sudo systemctl start agent2077"
+fi
 echo ""
 echo "  Development mode:"
 echo "    cd $INSTALL_DIR && npm run dev"
 echo ""
 echo "  Services:"
 echo "    SearXNG:     http://localhost:8888"
-echo "    Agent2077:   http://localhost:5000 (direct)"
+echo "    Agent2077:   http://localhost:$HOST_PORT (direct)"
 echo "    Agent2077:   http://Agent2077.local (via nginx)"
 echo ""
 echo "  View logs:"

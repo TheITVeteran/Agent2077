@@ -391,12 +391,61 @@ ok "Production build complete → dist/"
 echo ""
 
 # ══════════════════════════════════════════════════════════════════
-#  STEP 10 — systemd service
+#  STEP 10 — host port + (optional) systemd service
 # ══════════════════════════════════════════════════════════════════
-echo -e "${BOLD}[10/10] systemd service${RESET}"
+echo -e "${BOLD}[10/10] Host port & service setup${RESET}"
 hr
 
-sudo tee /etc/systemd/system/agent2077.service > /dev/null << SERVICEEOF
+# ── Host port selection ──────────────────────────────────────────────
+# The server reads PORT from its environment (process.env.PORT) and also
+# honours a network.port row in the settings DB. We let the operator pick
+# the port here once and thread it through env, the DB, and (if chosen)
+# the systemd unit so everything agrees.
+HOST_PORT="5000"
+echo ""
+echo -e "${BOLD}Host port${RESET}"
+echo "  Which port should Agent2077 listen on? (default 5000)"
+echo ""
+while true; do
+    read -r -p "  Port [5000]: " PORT_CHOICE
+    PORT_CHOICE="${PORT_CHOICE:-5000}"
+    if [[ "$PORT_CHOICE" =~ ^[0-9]+$ ]] && [ "$PORT_CHOICE" -ge 1 ] && [ "$PORT_CHOICE" -le 65535 ]; then
+        HOST_PORT="$PORT_CHOICE"
+        ok "Agent2077 will listen on port $HOST_PORT"
+        break
+    fi
+    echo "  Please enter a number between 1 and 65535."
+done
+echo ""
+
+# Persist the port into the settings DB so start.sh and the server pick it up
+# even when PORT isn't exported in the environment.
+DB_FILE="$INSTALL_DIR/data/agent2077.db"
+if command -v sqlite3 &>/dev/null && [ -f "$DB_FILE" ]; then
+    sqlite3 "$DB_FILE" "INSERT INTO settings(key, value, updated_at) VALUES('network.port', '$HOST_PORT', datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at;"
+    ok "Port saved to database (network.port=$HOST_PORT)"
+fi
+
+# ── Optional systemd service ─────────────────────────────────────────
+# Previously this step ALWAYS wrote + enabled a boot service. That surprised
+# users who didn't want Agent2077 starting on every boot. It is now opt-in:
+# answer No (the default) to skip it entirely and start manually with ./start.sh.
+echo -e "${BOLD}Auto-start on boot (systemd)${RESET}"
+echo "  Install a systemd service so Agent2077 starts automatically on boot?"
+echo -e "  ${YELLOW}If you select No, start it manually with ./start.sh or 'npm start'.${RESET}"
+echo ""
+INSTALL_SYSTEMD="false"
+while true; do
+    read -r -p "  Install + enable systemd service? [y/N] " SYSTEMD_CHOICE
+    case "${SYSTEMD_CHOICE,,}" in
+        y|yes) INSTALL_SYSTEMD="true"; break ;;
+        n|no|"") INSTALL_SYSTEMD="false"; break ;;
+        *) echo "  Please enter y or n." ;;
+    esac
+done
+
+if [ "$INSTALL_SYSTEMD" = "true" ]; then
+    sudo tee /etc/systemd/system/agent2077.service > /dev/null << SERVICEEOF
 [Unit]
 Description=Agent2077 AI Agent Platform
 After=network.target docker.service
@@ -407,7 +456,7 @@ Type=simple
 User=$USER
 WorkingDirectory=$INSTALL_DIR
 Environment=NODE_ENV=production
-Environment=PORT=5000
+Environment=PORT=$HOST_PORT
 Environment=HOST=0.0.0.0
 ExecStart=$NODE_BIN $INSTALL_DIR/dist/index.cjs
 Restart=always
@@ -419,9 +468,14 @@ StandardError=journal
 WantedBy=multi-user.target
 SERVICEEOF
 
-sudo systemctl daemon-reload
-sudo systemctl enable agent2077
-ok "systemd service registered (agent2077.service)"
+    sudo systemctl daemon-reload
+    sudo systemctl enable agent2077
+    ok "systemd service registered + enabled (agent2077.service)"
+else
+    warn "Skipping systemd service — Agent2077 will NOT auto-start on boot."
+    info "Start it manually with ./start.sh, or install the service later:"
+    info "  sudo systemctl daemon-reload && sudo systemctl enable --now agent2077"
+fi
 echo ""
 
 # Kill the sudo keepalive — we're done with privileged steps
@@ -485,15 +539,17 @@ echo ""
 echo -e "${BOLD}  Quick reference${RESET}"
 echo ""
 echo "  Start (easy):         ./start.sh"
-echo "  Start (manual):       NODE_ENV=production node dist/index.cjs $LISTEN_FLAG"
+echo "  Start (manual):       NODE_ENV=production PORT=$HOST_PORT node dist/index.cjs $LISTEN_FLAG"
+if [ "$INSTALL_SYSTEMD" = "true" ]; then
 echo "  Start (service):      sudo systemctl start agent2077"
 echo "  Stop  (service):      sudo systemctl stop agent2077"
 echo "  Logs:                 journalctl -u agent2077 -f"
+fi
 echo "  Dev mode:             npm run dev"
 echo ""
-echo "  Local URL:            http://localhost:5000"
+echo "  Local URL:            http://localhost:$HOST_PORT"
 if [ -n "$LISTEN_FLAG" ]; then
-echo "  LAN URL:              http://agent2077.local"
+echo "  LAN URL:              http://agent2077.local:$HOST_PORT"
 fi
 echo "  Default login:        Agent2077 / Agent2077"
 echo ""
@@ -519,18 +575,22 @@ case "${LAUNCH_CHOICE,,}" in
     n|no)
         echo "  You can start it any time with:"
         echo ""
-        echo "    NODE_ENV=production node dist/index.cjs $LISTEN_FLAG"
+        echo "    ./start.sh"
+        echo "    — or —"
+        echo "    NODE_ENV=production PORT=$HOST_PORT node dist/index.cjs $LISTEN_FLAG"
+        if [ "$INSTALL_SYSTEMD" = "true" ]; then
         echo "    — or —"
         echo "    sudo systemctl start agent2077"
+        fi
         echo ""
         ;;
     *)
         echo -e "  ${BOLD}Starting Agent2077...${RESET}"
         echo ""
         if [ -n "$LISTEN_FLAG" ]; then
-            info "LAN mode on — access from any device at http://agent2077.local"
+            info "LAN mode on — access from any device at http://agent2077.local:$HOST_PORT"
         else
-            info "Local only — access at http://localhost:5000"
+            info "Local only — access at http://localhost:$HOST_PORT"
         fi
         echo ""
         echo "  Press Ctrl+C to stop."

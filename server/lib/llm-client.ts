@@ -440,6 +440,9 @@ export function resolveToolAttachment(
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
+  // Normally a string (or null). For multimodal/vision turns this carries an
+  // array of content parts ({ type: "text" } / { type: "image_url" }); such
+  // messages are built at the request boundary and cast to ChatMessage there.
   content: string | null;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
@@ -502,6 +505,39 @@ export function cancelRequest(requestId: string) {
   }
 }
 
+// ── Agent-loop canceller registry ─────────────────────────────────────────────
+// cancelRequest() only aborts the single in-flight fetch and then removes it from
+// the map. That alone does NOT stop the agent loop: if the stop arrives while a
+// tool is executing (or between iterations), the next chatCompletionStream simply
+// registers a fresh controller and generation resumes — so the Stop button looked
+// like it did nothing. The agent loop registers its own cancel function here so a
+// stop reliably flips the loop's `cancelled` flag and aborts its persistent
+// loop-level AbortController regardless of when the stop lands.
+const loopCancellers = new Map<string, () => void>();
+
+export function registerLoopCanceller(requestId: string, cancel: () => void): void {
+  loopCancellers.set(requestId, cancel);
+}
+
+export function unregisterLoopCanceller(requestId: string): void {
+  loopCancellers.delete(requestId);
+}
+
+/**
+ * Stop a request fully: cancel the in-flight fetch AND tell the owning agent loop
+ * to stop iterating. Safe to call when no loop is registered (falls back to just
+ * aborting the fetch).
+ */
+export function stopRequest(requestId: string): void {
+  const cancel = loopCancellers.get(requestId);
+  if (cancel) {
+    try { cancel(); } catch { /* loop already gone */ }
+  } else {
+    // No registered loop (e.g. a non-loop completion) — at least abort the fetch.
+    cancelRequest(requestId);
+  }
+}
+
 /**
  * Send a chat completion request to an LM Studio endpoint
  */
@@ -531,7 +567,15 @@ export async function chatCompletion(
   // ── OpenRouter balance floor pre-flight check ─────────────────────────────
   const floorErr = await checkOpenRouterBalanceFloor(endpoint);
   if (floorErr) {
-    return { role: "assistant", content: floorErr, toolCalls: [], error: true };
+    return {
+      content: floorErr,
+      toolCalls: [],
+      tokensIn: 0,
+      tokensOut: 0,
+      durationMs: 0,
+      finishReason: "error",
+      modelUsed: model.modelId,
+    };
   }
 
   const controller = new AbortController();

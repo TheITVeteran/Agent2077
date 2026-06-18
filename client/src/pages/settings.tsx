@@ -61,6 +61,7 @@ type Model = {
   id: number; endpointId: number; modelId: string; type: string;
   maxContextLength?: number; loadedContextLength?: number; preferredContextLength?: number;
   isEnabled: boolean; taskAssignment?: string; supportsToolCalling: boolean; notes?: string;
+  isSubAgent?: boolean;
   temperature?: number | null; topP?: number | null;
   thinkingEnabled?: boolean; reasoningProfiles?: string | null;
 };
@@ -100,13 +101,44 @@ function parseReasoningProfiles(raw?: string | null): ReasoningProfile[] {
 }
 
 // Quick-add presets covering the common providers.
-const REASONING_PRESETS: { label: string; make: () => ReasoningProfile }[] = [
+const REASONING_PRESETS: { label: string; title?: string; make: () => ReasoningProfile }[] = [
   { label: "Off", make: () => ({ id: genProfileId(), label: "Off", strategy: "off" }) },
   { label: "OpenAI Low", make: () => ({ id: genProfileId(), label: "OpenAI Low", strategy: "openai_effort", level: "low" }) },
   { label: "OpenAI Medium", make: () => ({ id: genProfileId(), label: "OpenAI Medium", strategy: "openai_effort", level: "medium" }) },
   { label: "OpenAI High", make: () => ({ id: genProfileId(), label: "OpenAI High", strategy: "openai_effort", level: "high" }) },
   { label: "Anthropic 8k", make: () => ({ id: genProfileId(), label: "Anthropic 8k", strategy: "anthropic_budget", budgetTokens: 8000 }) },
   { label: "Prompt Prefix", make: () => ({ id: genProfileId(), label: "Think step-by-step", strategy: "prompt_prefix", promptPrefix: "Think step by step before answering." }) },
+  // DeepSeek V4 Flash thinking modes (local vLLM). The model toggles thinking via
+  // chat_template_kwargs on extra_body — carried through the custom_json strategy
+  // (extra_body is allowlisted in llm-client's CUSTOM_JSON_ALLOWLIST).
+  {
+    label: "DeepSeek V4 High",
+    title: "DeepSeek V4 Flash — normal thinking (reasoning_effort: high). Good default for everyday reasoning.",
+    make: () => ({
+      id: genProfileId(),
+      label: "DeepSeek V4 High",
+      strategy: "custom_json",
+      customBody: {
+        extra_body: {
+          chat_template_kwargs: { thinking: true, preserve_thinking: true, reasoning_effort: "high" },
+        },
+      },
+    }),
+  },
+  {
+    label: "DeepSeek V4 Max",
+    title: "DeepSeek V4 Flash — deepest/slowest reasoning (reasoning_effort: max). Recommended for large-context launches (>= 393216 tokens).",
+    make: () => ({
+      id: genProfileId(),
+      label: "DeepSeek V4 Max",
+      strategy: "custom_json",
+      customBody: {
+        extra_body: {
+          chat_template_kwargs: { thinking: true, preserve_thinking: true, reasoning_effort: "max" },
+        },
+      },
+    }),
+  },
 ];
 
 /** Parse task tags from taskAssignment field (JSON array or legacy string) */
@@ -572,6 +604,7 @@ function ReasoningProfilesEditor({
           <button
             key={preset.label}
             onClick={() => addPreset(preset.make)}
+            title={preset.title}
             className="text-[10px] px-1.5 py-0.5 rounded border border-border text-muted-foreground hover:border-yellow-500/50 hover:text-yellow-400 transition-colors"
             data-testid={`reasoning-preset-${preset.label.replace(/\s+/g, "-").toLowerCase()}`}
           >
@@ -1948,6 +1981,7 @@ export default function SettingsPage() {
   // Network Security
   const [lanServing, setLanServing] = useState(false);
   const [httpsEnabled, setHttpsEnabled] = useState(false);
+  const [hostPort, setHostPort] = useState("5000");
 
   // Storage / Paths
   const [projectsRoot, setProjectsRoot] = useState("");
@@ -2001,6 +2035,7 @@ export default function SettingsPage() {
     if (settingsData["comfyuiAutoApprove"] !== undefined) setComfyuiAutoApprove(settingsData["comfyuiAutoApprove"] === "true");
     if (settingsData["comfyuiMaxConcurrent"]) setComfyuiMaxConcurrent(settingsData["comfyuiMaxConcurrent"]);
     if (settingsData["network.lanServing"] !== undefined) setLanServing(settingsData["network.lanServing"] === "true");
+    if (settingsData["network.port"] !== undefined && settingsData["network.port"]) setHostPort(String(settingsData["network.port"]));
     if (settingsData["network.httpsEnabled"] !== undefined) setHttpsEnabled(settingsData["network.httpsEnabled"] === "true");
     if (settingsData["paths.projectsRoot"] !== undefined) setProjectsRoot(settingsData["paths.projectsRoot"] || "");
     if (settingsData["paths.showWorkspaceChatsInSidebar"] !== undefined) setShowWorkspaceChatsInSidebar(settingsData["paths.showWorkspaceChatsInSidebar"] === "true");
@@ -2330,6 +2365,30 @@ export default function SettingsPage() {
       {/* Network Security */}
       <Section title="NETWORK SECURITY" icon={Shield}>
         <div className="space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <Label className="text-xs font-medium">Host Port</Label>
+              <p className="text-[10px] text-muted-foreground mt-0.5">
+                Port Agent2077 listens on. A <code>PORT</code> environment variable overrides this.
+                <strong> Requires restart.</strong>
+              </p>
+            </div>
+            <Input
+              type="number"
+              min={1}
+              max={65535}
+              value={hostPort}
+              onChange={e => setHostPort(e.target.value)}
+              onBlur={() => {
+                const n = parseInt(hostPort);
+                if (Number.isInteger(n) && n >= 1 && n <= 65535) {
+                  updateSettingsMutation.mutate({ "network.port": String(n) });
+                }
+              }}
+              className="w-24 h-8 text-xs"
+              data-testid="input-host-port"
+            />
+          </div>
           <div className="flex items-center justify-between">
             <div>
               <Label className="text-xs font-medium">LAN Serving</Label>

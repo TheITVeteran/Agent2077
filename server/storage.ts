@@ -138,6 +138,7 @@ export const conversationStore = {
       )
     ).run();
     db.delete(s.taskPlans).where(eq(s.taskPlans.conversationId, id)).run();
+    db.delete(s.documents).where(eq(s.documents.conversationId, id)).run();
     return db.delete(s.conversations).where(eq(s.conversations.id, id)).run();
   },
   bulkDelete(ids: number[]) {
@@ -201,6 +202,50 @@ export const messageStore = {
     db.delete(s.taskPlans).where(eq(s.taskPlans.conversationId, conversationId)).run();
     db.delete(s.messages).where(eq(s.messages.conversationId, conversationId)).run();
     db.update(s.conversations).set({ updatedAt: new Date().toISOString() }).where(eq(s.conversations.id, conversationId)).run();
+  },
+};
+
+// ── Documents (per-conversation chat document canvas) ───────────────
+export const documentStore = {
+  // One document per conversation to start. Returns the existing doc or undefined.
+  getByConversation(conversationId: number): s.Document | undefined {
+    return db.select().from(s.documents)
+      .where(eq(s.documents.conversationId, conversationId))
+      .orderBy(desc(s.documents.id))
+      .get();
+  },
+  getById(id: number): s.Document | undefined {
+    return db.select().from(s.documents).where(eq(s.documents.id, id)).get();
+  },
+  create(data: s.InsertDocument): s.Document {
+    return db.insert(s.documents).values(data).returning().get();
+  },
+  update(id: number, data: Partial<s.InsertDocument>): s.Document | undefined {
+    return db.update(s.documents)
+      .set({ ...data, updatedAt: new Date().toISOString() })
+      .where(eq(s.documents.id, id))
+      .returning().get();
+  },
+  // Get-or-create then apply the given fields. The single entry point used by the
+  // API upsert route and the agent tools so doc state is always scoped to a
+  // conversation (never an arbitrary id/path).
+  upsert(conversationId: number, data: Partial<s.InsertDocument>): s.Document {
+    const existing = this.getByConversation(conversationId);
+    if (existing) {
+      return this.update(existing.id, data)!;
+    }
+    return this.create({
+      conversationId,
+      title: data.title ?? "Untitled",
+      content: data.content ?? "",
+      format: data.format ?? "markdown",
+    });
+  },
+  delete(id: number): void {
+    db.delete(s.documents).where(eq(s.documents.id, id)).run();
+  },
+  deleteByConversation(conversationId: number): void {
+    db.delete(s.documents).where(eq(s.documents.conversationId, conversationId)).run();
   },
 };
 
